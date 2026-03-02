@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import time
 
@@ -151,10 +153,34 @@ class CommandsMixin:
         """Copy last assistant response to clipboard."""
         for msg in reversed(self.messages):
             if msg["role"] == "assistant":
-                self.copy_to_clipboard(msg["content"])
-                await self._show_system_message("Copied to clipboard")
+                self._copy_text(msg["content"])
                 return
         await self._show_system_message("Nothing to copy")
+
+    def _copy_text(self, text: str) -> None:
+        """Copy text to clipboard via system tool, with OSC 52 as fallback."""
+        # Try system clipboard tools in order of preference
+        for cmd in ("wl-copy", "xclip", "xsel", "pbcopy", "clip.exe"):
+            path = shutil.which(cmd)
+            if not path:
+                continue
+            args = [path]
+            if cmd == "xclip":
+                args += ["-selection", "clipboard"]
+            elif cmd == "xsel":
+                args += ["--clipboard", "--input"]
+            try:
+                subprocess.run(
+                    args, input=text.encode(), check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                self.notify("Copied to clipboard")
+                return
+            except (subprocess.CalledProcessError, OSError):
+                continue
+        # No system tool available — fall back to OSC 52 (terminal support varies)
+        self.copy_to_clipboard(text)
+        self.notify("Copied to clipboard (OSC 52 — may not work in all terminals)")
 
     async def _handle_project_toggle(self) -> None:
         """Toggle append_local_prompt and reload system prompt."""
