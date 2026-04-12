@@ -49,7 +49,7 @@ This project was entirely vibe-coded with Claude. It does exactly what I need.
 ## Installation
 
 ```bash
-git clone https://github.com/youruser/ollama-chat
+git clone https://github.com/baptisterajaut/ollama-chat
 cd ollama-chat
 
 # Optional: symlink to your bin
@@ -61,7 +61,7 @@ The virtual environment and dependencies are created automatically on first run.
 ### Windows (untested)
 
 ```cmd
-git clone https://github.com/youruser/ollama-chat
+git clone https://github.com/baptisterajaut/ollama-chat
 cd ollama-chat
 ochat.bat
 ```
