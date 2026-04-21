@@ -385,5 +385,14 @@ class Message(Container):
             self._reasoning_block.display = False
 
 
-class ChatContainer(ScrollableContainer):
-    """Scrollable container for chat messages."""
+class ChatContainer(ScrollableContainer, can_focus=False):
+    """Scrollable container for chat messages.
+
+    `can_focus=False` matters for perf: the default `ScrollableContainer`
+    is focusable, so any click in the chat area (including clicks
+    Textual routes for scrolling) triggered a focus transfer here, and
+    `Widget.watch_has_focus` then walked every descendant to re-apply
+    the stylesheet — thousands of MarkdownBlock widgets in a populated
+    conversation, seconds of UI freeze per focus change. Mouse-wheel
+    scrolling still works without focus.
+    """

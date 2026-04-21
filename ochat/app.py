@@ -189,11 +189,14 @@ class OChat(CommandsMixin, GenerationMixin, App):
         """Context manager: set is_generating, disable input, restore on exit."""
         self.is_generating = True
         input_widget = self.query_one("#chat-input", Input)
+        previous_placeholder = input_widget.placeholder
         input_widget.disabled = True
+        input_widget.placeholder = "generation in progress..."
         try:
             yield
         finally:
             input_widget.disabled = False
+            input_widget.placeholder = previous_placeholder
             self.is_generating = False
             self.query_one("#status", Static).update(self._status_text())
             input_widget.focus()
