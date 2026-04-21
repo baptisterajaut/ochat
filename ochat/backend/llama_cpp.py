@@ -93,7 +93,11 @@ class LlamaCppBackend:
         return [m.id for m in response.data]
 
     def extract_chunk(self, chunk) -> str:
-        content = chunk.choices[0].delta.content or ""
+        choices = chunk.choices
+        if not choices:
+            return ""
+        delta = choices[0].delta
+        content = delta.content if (delta and delta.content) else ""
         # Check if this is the last chunk with usage (delta is None when usage included)
         if chunk.usage is not None:
             self._context_tokens = chunk.usage.prompt_tokens
@@ -106,5 +110,5 @@ class LlamaCppBackend:
             self._context_tokens = usage.prompt_tokens
             total_tokens = usage.prompt_tokens + usage.completion_tokens
         else:
-            total_tokens = getattr(usage, "completion_tokens", None) or len(content) // 4
+            total_tokens = len(content) // 4
         return content, total_tokens
