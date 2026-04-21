@@ -68,7 +68,7 @@ class GenerationMixin:
                 if reasoning:
                     response_reasoning += reasoning
 
-          response_text, response_reasoning, tokens_generated, cancelled = await self._consume_chunks(
+                response_text, response_reasoning, tokens_generated, cancelled = await self._consume_chunks(
                 stream, assistant_msg, chat, status, start_time,
                 response_text, response_reasoning, tokens_generated,
             )
