@@ -29,12 +29,13 @@ def create_backend(backend_type: str, host: str, verify_ssl: bool) -> BackendPro
 
 
 class AutoBackend:
-    """Automatically detect backend by trying Ollama first, then OpenAI-compatible."""
+    """Automatically detect backend by trying Ollama first, then llama.cpp, then OpenAI-compatible."""
 
     def __init__(self, host: str = "http://localhost:11434", verify_ssl: bool = True) -> None:
         self.host = host
         self.verify_ssl = verify_ssl
         self._ollama = OllamaBackend(host=host, verify_ssl=verify_ssl)
+        self._llama_cpp = LlamaCppBackend(host=host, verify_ssl=verify_ssl)
         self._openai = OpenAIBackend(host=host, verify_ssl=verify_ssl)
         self._detected_backend: BackendProtocol | None = None
         self._type = "auto"
@@ -57,6 +58,14 @@ class AutoBackend:
         except Exception:
             pass
 
+        # Try llama.cpp via /v1/models
+        try:
+            self._llama_cpp.list_models()
+            self._detected_backend = self._llama_cpp
+            return self._detected_backend
+        except Exception:
+            pass
+
         # Try OpenAI-compatible
         try:
             self._openai.list_models()
@@ -65,7 +74,7 @@ class AutoBackend:
         except Exception:
             pass
 
-        raise RuntimeError("Could not detect backend: Ollama and OpenAI-compatible both failed")
+        raise RuntimeError("Could not detect backend: Ollama, llama.cpp, and OpenAI-compatible all failed")
 
     def chat(self, model: str, messages: list[dict], stream: bool,
              num_ctx: int = 4096, model_options: dict | None = None) -> dict:
