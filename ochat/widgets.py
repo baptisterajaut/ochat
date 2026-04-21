@@ -46,12 +46,23 @@ class Message(Markdown):
         self.reasoning = reasoning
         display_content = content.strip()
         if role == "assistant" and reasoning:
-            display_content = f"● {reasoning}\n---\n\n{content}"
+            display_content = f"● > {reasoning}\n\n---\n\n{content}"
         elif role == "assistant":
             display_content = f"● {display_content}"
         elif role == "user":
             display_content = f"› {display_content}"
         super().__init__(display_content, classes=f"message {role}")
+
+    def update(self, content: str, *, reasoning: str = "") -> None:
+        self.reasoning = reasoning
+        display_content = content.strip()
+        if self.role == "assistant" and reasoning:
+            display_content = f"● > {reasoning}\n\n---\n\n{content}"
+        elif self.role == "assistant":
+            display_content = f"● {display_content}"
+        elif self.role == "user":
+            display_content = f"› {display_content}"
+        super().update(display_content)
 
 
 class ChatContainer(ScrollableContainer):

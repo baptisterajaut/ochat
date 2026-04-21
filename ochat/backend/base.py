@@ -12,8 +12,8 @@ class BackendProtocol(Protocol):
         """List available model names."""
         ...
 
-    def extract_chunk(self, chunk) -> str:
-        """Extract text content from a streaming chunk."""
+    def extract_chunk(self, chunk) -> tuple[str, str]:
+        """Extract (reasoning, content) from a streaming chunk."""
         ...
 
     def extract_result(self, result) -> tuple[str, int]:

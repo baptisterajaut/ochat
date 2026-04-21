@@ -27,6 +27,13 @@ ChatContainer {
     color: $text;
 }
 
+.message.assistant MarkdownBlockQuote {
+    color: $text-muted;
+    text-style: italic;
+    padding: 0 1;
+    border-left: 1 $text-muted;
+}
+
 .message.system-info {
     color: $text-muted;
     text-style: italic;

@@ -28,8 +28,8 @@ class GenerationMixin:
     def _chat_call(self, messages: list[dict], stream: bool):
         return self.backend.chat(self.model, messages, stream, self.num_ctx, self.model_options)
 
-    def _extract_chunk(self, chunk) -> str:
-        """Extract text content from a streaming chunk."""
+    def _extract_chunk(self, chunk) -> tuple[str, str]:
+        """Extract (reasoning, content) from a streaming chunk."""
         return self.backend.extract_chunk(chunk)
 
     def _extract_result(self, result) -> tuple[str, int]:
@@ -49,6 +49,7 @@ class GenerationMixin:
         await asyncio.sleep(0)  # Let UI refresh
 
         response_text = ""
+        response_reasoning = ""
         start_time = time.time()
         tokens_generated = 0
         cancelled = False
@@ -60,21 +61,24 @@ class GenerationMixin:
             self.last_ttft = time.time() - start_time if not self._generation_cancelled else 0.0
 
             if first_chunk and not self._generation_cancelled:
-                content = self._extract_chunk(first_chunk)
+                reasoning, content = self._extract_chunk(first_chunk)
                 if content:
                     response_text += content
                     tokens_generated += 1
+                if reasoning:
+                    response_reasoning += reasoning
 
-                response_text, tokens_generated, cancelled = await self._consume_chunks(
-                    stream, assistant_msg, chat, status, start_time,
-                    response_text, tokens_generated,
-                )
+          response_text, response_reasoning, tokens_generated, cancelled = await self._consume_chunks(
+                stream, assistant_msg, chat, status, start_time,
+                response_text, response_reasoning, tokens_generated,
+            )
 
                 # Non-streaming: show buffered response after completion
                 if not self.streaming and not cancelled:
                     think_time = time.time() - start_time
                     await assistant_msg.update(
-                        f"● *thought for {think_time:.1f}s*\n\n{response_text}"
+                        f"*thought for {think_time:.1f}s*\n\n{response_text}",
+                        reasoning=response_reasoning,
                     )
                     chat.scroll_end(animate=False)
 
@@ -112,23 +116,28 @@ class GenerationMixin:
             )
 
     async def _consume_chunks(self, stream, assistant_msg, chat, status,
-                              start_time, response_text, tokens_generated):
-        """Consume stream chunks, updating UI. Returns (text, tokens, cancelled)."""
+                              start_time, response_text, response_reasoning, tokens_generated):
+        """Consume stream chunks, updating UI. Returns (text, reasoning, tokens, cancelled)."""
         while True:
             chunk = await self._anext(stream)
             if chunk is _STREAM_DONE or self._generation_cancelled:
-                return response_text, tokens_generated, self._generation_cancelled
+                return response_text, response_reasoning, tokens_generated, self._generation_cancelled
 
-            content = self._extract_chunk(chunk)
+            reasoning, content = self._extract_chunk(chunk)
             if content:
                 response_text += content
                 tokens_generated += 1
+            if reasoning:
+                response_reasoning += reasoning
 
             elapsed = time.time() - start_time
 
             if self.streaming:
-                if content:
-                    await assistant_msg.update(f"● {response_text}")
+                if content or reasoning:
+                    await assistant_msg.update(
+                        f"● {response_text}",
+                        reasoning=response_reasoning,
+                    )
                     chat.scroll_end(animate=False)
                 tps = tokens_generated / elapsed if elapsed > 0 else 0
                 status.update(self._status_text(
@@ -137,7 +146,8 @@ class GenerationMixin:
             else:
                 frame = self.SPINNER_FRAMES[int(elapsed * 10) % len(self.SPINNER_FRAMES)]
                 await assistant_msg.update(
-                    f"● {frame} thinking... {elapsed:.1f}s ({tokens_generated} chunks)"
+                    f"● {frame} thinking... {elapsed:.1f}s ({tokens_generated} chunks)",
+                    reasoning=response_reasoning,
                 )
                 chat.scroll_end(animate=False)
                 status.update(self._status_text(
