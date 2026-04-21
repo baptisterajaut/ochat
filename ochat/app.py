@@ -112,7 +112,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
 
-       @property
+    @property
     def openai_client(self):
         """Legacy property for backwards compatibility."""
         if self.backend_type == "openai":
@@ -201,7 +201,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         return f"Messages: {msg_count} | Tokens used: ~{estimated} ({pct:.0f}%) | Context size: {self.num_ctx}"
 
     def _status_text(self, extra: str = "") -> str:
-       if self.backend_type == "auto":
+        if self.backend_type == "auto":
             base = f"{self.model} (auto)"
         elif self.backend_type == "openai":
             base = f"{self.model} (openai)"
@@ -234,7 +234,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         """Keep focus on input when clicking anywhere."""
         self.query_one("#chat-input", Input).focus()
 
-async def _show_greeting(self) -> None:
+    async def _show_greeting(self) -> None:
         """Show greeting with ASCII art after validating connection."""
         chat = self.query_one("#chat", ChatContainer)
         config_line = f"config: {self.config_name} · " if self.config_name else ""
@@ -264,6 +264,10 @@ async def _show_greeting(self) -> None:
                 self.api_mode = self.backend_type
                 _log.info("Connected in %s mode", self.backend_type)
                 mode_label = "Connected"
+            except Exception as e:
+                _log.warning("Backend list failed: %s", e)
+                await self._show_system_message("Warning: Cannot connect to server")
+                return
 
         logo = f"""\
   ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
