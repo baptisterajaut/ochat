@@ -49,17 +49,27 @@ class LlamaCppBackend:
         return self._client
 
     def _refresh_info(self) -> None:
-        """Fetch /info and cache n_ctx."""
-        try:
-            url = f"{self.host.rstrip('/')}/info"
-            with httpx.Client(verify=self.verify_ssl) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-                self._info_cache = resp.json()
-                self._n_ctx = self._info_cache.get("n_ctx", 0)
-        except Exception:
-            self._info_cache = {}
-            self._n_ctx = 4096  # fallback
+        """Fetch n_ctx from /v1/models or /info (llama.cpp-specific)."""
+        self._info_cache = {}
+        self._n_ctx = 4096  # fallback
+        for path in ["/v1/models", "/info"]:
+            try:
+                url = f"{self.host.rstrip('/')}{path}"
+                with httpx.Client(verify=self.verify_ssl) as client:
+                    resp = client.get(url)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if path == "/v1/models":
+                        models_data = data.get("data", [])
+                        if models_data:
+                            self._n_ctx = models_data[0].get("n_ctx", 4096)
+                            return
+                    else:
+                        self._info_cache = data
+                        self._n_ctx = data.get("n_ctx", 4096)
+                        return
+            except Exception:
+                continue
 
     def get_info(self) -> dict:
         if self._info_cache is None:

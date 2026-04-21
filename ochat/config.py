@@ -485,34 +485,7 @@ def run_setup(create_new: bool = False) -> None:
 
   # 3. Ask for context size
     if backend == "llama_cpp":
-        # Try /v1/models first (standard), then /info (llama.cpp-specific)
-        server_n_ctx = None
-        for path in ["/v1/models", "/info"]:
-            try:
-                import httpx
-                url = f"{host.rstrip('/')}{path}"
-                with httpx.Client(verify=verify_ssl) as client:
-                    resp = client.get(url)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if path == "/v1/models":
-                        # /v1/models returns {"data": [{"id", "n_ctx", ...}]}
-                        models_data = data.get("data", [])
-                        if models_data:
-                            server_n_ctx = models_data[0].get("n_ctx")
-                    else:
-                        # /info returns {"n_ctx": ..., ...}
-                        server_n_ctx = data.get("n_ctx")
-                    if server_n_ctx is not None:
-                        break
-            except Exception:
-                continue
-        if server_n_ctx is not None:
-            print(f"\nServer n_ctx: {server_n_ctx}")
-            print("Context size below is advisory (server-determined)")
-        else:
-            print("\nCould not fetch server n_ctx — context size will be advisory")
-        num_ctx = _input_positive_int("Advisory context size", config["num_ctx"])
+        num_ctx = _input_positive_int("Context size", config["num_ctx"])
     elif backend == "openai":
         print("\nContext size: N/A (server-determined)")
         num_ctx = config["num_ctx"]
