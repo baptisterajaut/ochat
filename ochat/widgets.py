@@ -40,14 +40,18 @@ class CommandSuggester(Suggester):
 class Message(Markdown):
     """A single chat message with role-based styling."""
 
-    def __init__(self, content: str, role: str = "user") -> None:
+    def __init__(self, content: str, role: str = "user",
+                 reasoning: str = "") -> None:
         self.role = role
-        content = content.strip()
-        if role == "assistant":
-            content = f"● {content}"
+        self.reasoning = reasoning
+        display_content = content.strip()
+        if role == "assistant" and reasoning:
+            display_content = f"● {reasoning}\n---\n\n{content}"
+        elif role == "assistant":
+            display_content = f"● {display_content}"
         elif role == "user":
-            content = f"› {content}"
-        super().__init__(content, classes=f"message {role}")
+            display_content = f"› {display_content}"
+        super().__init__(display_content, classes=f"message {role}")
 
 
 class ChatContainer(ScrollableContainer):

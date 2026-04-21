@@ -92,16 +92,17 @@ class LlamaCppBackend:
         response = self.client.models.list()
         return [m.id for m in response.data]
 
-    def extract_chunk(self, chunk) -> str:
+    def extract_chunk(self, chunk) -> tuple[str, str]:
         choices = chunk.choices
         if not choices:
-            return ""
+            return "", ""
         delta = choices[0].delta
+        reasoning = getattr(delta, "reasoning_content", "") or ""
         content = delta.content if (delta and delta.content) else ""
         # Check if this is the last chunk with usage (delta is None when usage included)
         if chunk.usage is not None:
             self._context_tokens = chunk.usage.prompt_tokens
-        return content
+        return reasoning, content
 
     def extract_result(self, result) -> tuple[str, int]:
         content = result.choices[0].message.content

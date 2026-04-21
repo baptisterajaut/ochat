@@ -53,11 +53,13 @@ class OpenAIBackend:
         response = self.client.models.list()
         return [m.id for m in response.data]
 
-    def extract_chunk(self, chunk) -> str:
-        content = chunk.choices[0].delta.content or ""
+    def extract_chunk(self, chunk) -> tuple[str, str]:
+        delta = chunk.choices[0].delta
+        reasoning = getattr(delta, "reasoning_content", "") or ""
+        content = delta.content if (delta and delta.content) else ""
         if chunk.usage is not None:
             self._context_tokens = chunk.usage.prompt_tokens
-        return content
+        return reasoning, content
 
     def extract_result(self, result) -> tuple[str, int]:
         content = result.choices[0].message.content

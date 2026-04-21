@@ -40,11 +40,13 @@ class OllamaBackend:
         response = self.client.list()
         return [m.model for m in response.models]
 
-    def extract_chunk(self, chunk) -> str:
-        content = chunk.get("message", {}).get("content", "")
+    def extract_chunk(self, chunk) -> tuple[str, str]:
+        message = chunk.get("message", {})
+        reasoning = message.get("reasoning_content", "") or ""
+        content = message.get("content", "")
         if chunk.get("eval_count"):
             self._context_tokens = chunk["eval_count"]
-        return content
+        return reasoning, content
 
     def extract_result(self, result) -> tuple[str, int]:
         content = result["message"]["content"]
