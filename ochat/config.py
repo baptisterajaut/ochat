@@ -2,10 +2,13 @@
 
 import configparser
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+_BACKUP_NAME_RE = re.compile(r"^[\w.-]+$")
 
 import ollama
 
@@ -198,6 +201,7 @@ def save_config_dict(config: dict, config_file: Path | None = None, **overrides)
         config_file=config_file,
         verify_ssl=merged.get("verify_ssl", True),
         auto_suggest=merged.get("auto_suggest", True),
+        backend=merged.get("backend", "ollama"),
     )
 
 
@@ -224,7 +228,14 @@ def switch_config_to_default(new_config_name: str, interactive: bool = True) -> 
 
         if not current_name:
             if interactive:
-                current_name = input("Name for current config backup [config-default]: ").strip()
+                while True:
+                    current_name = input("Name for current config backup [config-default]: ").strip()
+                    if not current_name:
+                        current_name = "config-default"
+                    if _BACKUP_NAME_RE.match(current_name):
+                        break
+                    print("Invalid name: use only letters, digits, '_', '-', '.'")
+                    current_name = ""
             if not current_name:
                 current_name = "config-default"
 
@@ -273,8 +284,10 @@ def load_system_prompt(
     """
     if path:
         p = Path(path)
-        if p.exists():
-            return p.read_text(encoding="utf-8").strip(), None
+        if not p.exists():
+            print(f"Error: system prompt file not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        return p.read_text(encoding="utf-8").strip(), None
 
     ensure_personalities_dir()
     personality_name = personality or "default"
@@ -296,9 +309,14 @@ def _backup_config_interactive(config: dict, default_name: str = "") -> None:
     """Prompt for backup name, check overwrite, and save. Used by run_setup."""
     backup_name = default_name
     if not backup_name:
-        backup_name = input("Name for current config backup [config-default]: ").strip()
-        if not backup_name:
-            backup_name = "config-default"
+        while True:
+            backup_name = input("Name for current config backup [config-default]: ").strip()
+            if not backup_name:
+                backup_name = "config-default"
+            if _BACKUP_NAME_RE.match(backup_name):
+                break
+            print("Invalid name: use only letters, digits, '_', '-', '.'")
+            backup_name = ""
 
     backup_file = CONFIG_DIR / f"{backup_name}.conf"
 
