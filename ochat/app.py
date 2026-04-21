@@ -166,6 +166,13 @@ class OChat(CommandsMixin, GenerationMixin, App):
         """Rough token estimate for all messages (~4 chars/token)."""
         return sum(len(m["content"]) // 4 for m in self.messages)
 
+    def _real_context_tokens(self) -> int:
+        """Get actual prompt token count from backend, fall back to estimation."""
+        tokens = self.backend.context_tokens
+        if tokens > 0:
+            return tokens
+        return self._estimate_context_tokens()
+
     def _reset_stats(self) -> None:
         """Reset generation stats and context warning."""
         self.total_tokens = 0
@@ -189,16 +196,28 @@ class OChat(CommandsMixin, GenerationMixin, App):
             input_widget.focus()
 
     def _context_pct(self) -> float:
-        """Estimated context usage as percentage."""
-        if self.num_ctx <= 0 or self.api_mode == "openai":
+        """Context usage as percentage (real tokens when available)."""
+        if self.backend_type == "openai":
             return 0.0
-        return self._estimate_context_tokens() / self.num_ctx * 100
+        tokens = self._real_context_tokens()
+        if self.backend_type == "llama_cpp":
+            n_ctx = self.backend.n_ctx
+        else:
+            n_ctx = self.num_ctx
+        if n_ctx <= 0:
+            return 0.0
+        return tokens / n_ctx * 100
 
     def _context_info(self) -> str:
         msg_count = len([m for m in self.messages if m["role"] != "system"])
-        estimated = self._estimate_context_tokens()
+        real_tokens = self._real_context_tokens()
         pct = self._context_pct()
-        return f"Messages: {msg_count} | Tokens used: ~{estimated} ({pct:.0f}%) | Context size: {self.num_ctx}"
+        if self.backend_type == "llama_cpp":
+            ctx_label = f"n_ctx: {self.backend.n_ctx} (server)"
+        else:
+            ctx_label = f"context: {self.num_ctx}"
+        prefix = "" if self.backend.context_tokens > 0 else "~"
+        return f"Messages: {msg_count} | Tokens used: {prefix}{real_tokens} ({pct:.0f}%) | {ctx_label}"
 
     def _status_text(self, extra: str = "") -> str:
         if self.backend_type == "auto":
