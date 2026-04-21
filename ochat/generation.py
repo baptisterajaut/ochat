@@ -23,34 +23,22 @@ def _clean_impersonate_response(response: str) -> str:
 
 
 class GenerationMixin:
-    """Mixin providing LLM generation capabilities for OllamaChat."""
+    """Mixin providing LLM generation capabilities for OChat."""
 
     def _chat_call(self, messages: list[dict], stream: bool):
         """Make API call, return stream iterator or result."""
-        if self.api_mode == "openai":
-            return self.openai_client.chat.completions.create(
-                model=self.model, messages=messages, stream=stream,
-            )
-        options = {"num_ctx": self.num_ctx, **self.model_options}
-        return self.ollama_client.chat(
-            model=self.model, messages=messages, stream=stream, options=options,
-        )
+        if self.backend_type == "auto":
+            backend = self.backend._detected_backend or self.backend._ollama
+            return backend.chat(self.model, messages, stream, self.num_ctx, self.model_options)
+        return self.backend.chat(self.model, messages, stream, self.num_ctx, self.model_options)
 
     def _extract_chunk(self, chunk) -> str:
         """Extract text content from a streaming chunk."""
-        if self.api_mode == "openai":
-            return chunk.choices[0].delta.content or ""
-        return chunk.get("message", {}).get("content", "")
+        return self.backend.extract_chunk(chunk)
 
     def _extract_result(self, result) -> tuple[str, int]:
         """Extract (content, token_count) from a non-streaming result."""
-        if self.api_mode == "openai":
-            content = result.choices[0].message.content
-            tokens = getattr(result.usage, "completion_tokens", None) or len(content) // 4
-            return content, tokens
-        content = result["message"]["content"]
-        tokens = result.get("eval_count", len(content) // 4)
-        return content, tokens
+        return self.backend.extract_result(result)
 
     async def _generate_response(self) -> None:
         """Generate assistant response (streaming or not)."""
