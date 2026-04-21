@@ -180,15 +180,17 @@ Logging uses the `"ochat"` logger hierarchy. Each module uses `_log = logging.ge
 
 - **SSL verification**: `verify_ssl` in `[server]` controls SSL certificate verification. Only written to config when `false` (default is `true`/absent). When `false`, `ollama.Client` gets `verify=False` and `openai.OpenAI` gets a custom `httpx.Client(verify=False)`. The setup wizard auto-detects SSL errors on HTTPS hosts and offers to disable verification.
 
-- **Backend abstraction**: All backend operations go through `BackendProtocol` interface (`chat()`, `list_models()`, `get_info()`, `extract_chunk()`, `extract_result()`). The `_chat_call()` helper in `GenerationMixin` delegates to `self.backend` — no mode branching. `AutoBackend` tries Ollama→llama.cpp→OpenAI sequentially. Each backend implements `BackendProtocol` with its own client (`self.client` for Ollama, `self.openai_client` for OpenAI/llama.cpp).
+- **Backend abstraction**: All backend operations go through `BackendProtocol` interface (`chat()`, `list_models()`, `get_info()`, `extract_chunk()`, `extract_result()`, `initialize()`). I/O methods are all async; chat streams yield an async iterator. The `_chat_call()` helper in `GenerationMixin` awaits `self.backend.chat(...)` directly — no mode branching, no `to_thread`. `AutoBackend` tries Ollama→llama.cpp→OpenAI sequentially inside `initialize()` (locked + idempotent), called from every entry point. Each backend wraps a native async client (`ollama.AsyncClient` for Ollama, `openai.AsyncOpenAI` for OpenAI/llama.cpp).
 
-- **Backend-specific features**: `num_ctx` is supported by Ollama (hardcoded 4096) and llama.cpp (via `/info` endpoint). Context tracking uses real token counts from API responses when available (`include_usage` for llama.cpp, `usage` field for Ollama), otherwise falls back to ~4 chars/token approximation. OpenAI mode has no context tracking.
+- **Backend-specific features**: `num_ctx` is passed through at construction (`OllamaBackend(num_ctx=...)`) or from `/info` (llama.cpp). Context tracking uses real token counts from API responses when available (`include_usage` for llama.cpp, `usage` field for Ollama), otherwise falls back to ~4 chars/token approximation. OpenAI mode has no context tracking.
 
 - **AutoBackend missing fields**: `AutoBackend.context_tokens` and `AutoBackend.n_ctx` delegate to `_detected_backend`. If `context_tokens` is unavailable, context info shows `~` prefix.
 
-- **Async stream iteration**: Stream chunks are fetched via `self._anext(stream)` which wraps `next()` in `asyncio.to_thread` to avoid blocking the Textual event loop. Never iterate a stream synchronously (`for chunk in stream`) in async code.
+- **Streaming iteration**: `_consume_chunks` iterates the stream via `async for chunk in stream` directly — no thread hops, no sentinels. Cancellation propagates naturally as `asyncio.CancelledError`. Graceful in-flight cancel (Escape) still uses `self._generation_cancelled` flag checked inside the loop.
 
-- **Async stream iteration**: Stream chunks are fetched via `self._anext(stream)` which wraps `next()` in `asyncio.to_thread` to avoid blocking the Textual event loop. Never iterate a stream synchronously (`for chunk in stream`) in async code.
+- **Markdown render throttling**: `Message` extends Textual's `Markdown`, which makes mistune re-parse the full buffer on every `update()`. Per-chunk updates are O(n²) at high token rates. `_consume_chunks` throttles streaming updates to ~50ms (via `time.monotonic()`); the final render is unconditional once the stream ends. Status-bar updates stay per-chunk (cheap).
+
+- **Generation lock**: Generation uses the `_generating_lock` async context manager as the single source of truth for `is_generating` + input-disable state. Background tasks (auto-suggest) are spawned **after** the lock releases so the user can type while the suggestion runs. Do not set `self.is_generating` manually.
 
 ## Generation modes
 

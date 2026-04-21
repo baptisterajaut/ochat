@@ -1,4 +1,4 @@
-"""OpenAI-compatible backend implementation."""
+"""OpenAI-compatible backend implementation (async)."""
 
 import httpx
 import openai
@@ -11,8 +11,11 @@ class OpenAIBackend:
         self.host = host
         self.verify_ssl = verify_ssl
         self._type = "openai"
-        self._client: openai.OpenAI | None = None
+        self._client: openai.AsyncOpenAI | None = None
         self._context_tokens: int = 0  # from last call usage.prompt_tokens
+
+    async def initialize(self) -> None:
+        return None
 
     @property
     def type(self) -> str:
@@ -28,34 +31,37 @@ class OpenAIBackend:
         return self._context_tokens
 
     @property
-    def client(self):
+    def client(self) -> openai.AsyncOpenAI:
         if self._client is None:
             base_url = f"{self.host.rstrip('/')}/v1"
             if not self.verify_ssl:
-                http_client = httpx.Client(verify=False)
-                self._client = openai.OpenAI(
+                http_client = httpx.AsyncClient(verify=False)
+                self._client = openai.AsyncOpenAI(
                     base_url=base_url, api_key="not-needed",
                     http_client=http_client,
                 )
             else:
-                self._client = openai.OpenAI(
+                self._client = openai.AsyncOpenAI(
                     base_url=base_url, api_key="not-needed",
                 )
         return self._client
 
-    def chat(self, model: str, messages: list[dict], stream: bool,
-             num_ctx: int = 4096, model_options: dict | None = None) -> dict:
-        return self.client.chat.completions.create(
+    async def chat(self, model: str, messages: list[dict], stream: bool,
+                   num_ctx: int = 4096, model_options: dict | None = None):
+        # num_ctx and model_options are ignored by OpenAI backend — kept for
+        # BackendProtocol interface compat. Acknowledge to silence unused-param.
+        _ = num_ctx, model_options
+        return await self.client.chat.completions.create(
             model=model, messages=messages, stream=stream,
         )
 
-    def list_models(self) -> list[str]:
-        response = self.client.models.list()
+    async def list_models(self) -> list[str]:
+        response = await self.client.models.list()
         return [m.id for m in response.data]
 
     def extract_chunk(self, chunk) -> tuple[str, str]:
-        delta = chunk.choices[0].delta
-        reasoning = getattr(delta, "reasoning_content", "") or ""
+        delta = chunk.choices[0].delta if chunk.choices else None
+        reasoning = getattr(delta, "reasoning_content", "") or "" if delta else ""
         content = delta.content if (delta and delta.content) else ""
         if chunk.usage is not None:
             self._context_tokens = chunk.usage.prompt_tokens
@@ -71,5 +77,5 @@ class OpenAIBackend:
             total_tokens = len(content) // 4
         return content, total_tokens
 
-    def get_info(self) -> dict:
+    async def get_info(self) -> dict:
         return {}

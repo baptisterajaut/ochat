@@ -1,15 +1,24 @@
-"""Ollama backend implementation."""
+"""Ollama backend implementation (async)."""
 
+import httpx
 import ollama
 
 
 class OllamaBackend:
-    """Backend for Ollama API."""
+    """Backend for Ollama API using the async client."""
 
-    def __init__(self, host: str = "http://localhost:11434", verify_ssl: bool = True) -> None:
-        self.client = ollama.Client(host=host, verify=verify_ssl)
+    def __init__(self, host: str = "http://localhost:11434", verify_ssl: bool = True,
+                 num_ctx: int = 4096) -> None:
+        self.host = host
+        self.verify_ssl = verify_ssl
+        self.client = ollama.AsyncClient(host=host, verify=verify_ssl)
         self._type = "ollama"
+        self._n_ctx = num_ctx
         self._context_tokens: int = 0  # from last call eval_count
+
+    async def initialize(self) -> None:
+        """No-op: concrete backends have nothing to detect."""
+        return None
 
     @property
     def type(self) -> str:
@@ -17,32 +26,36 @@ class OllamaBackend:
 
     @property
     def n_ctx(self) -> int:
-        """Ollama context size (client-configurable)."""
-        return 4096  # default; actual value tracked by caller
+        """Ollama context size (from config passed at construction)."""
+        return self._n_ctx
 
     @property
     def context_tokens(self) -> int:
         return self._context_tokens
 
-    def chat(self, model: str, messages: list[dict], stream: bool,
-             num_ctx: int = 4096, model_options: dict | None = None) -> dict:
+    async def chat(self, model: str, messages: list[dict], stream: bool,
+                   num_ctx: int = 4096, model_options: dict | None = None):
         opts = {"num_ctx": num_ctx, **(model_options or {})}
         # `think` is a top-level kwarg in ollama-python, not an option
         think = opts.pop("think", None)
         kwargs = {"model": model, "messages": messages, "stream": stream, "options": opts}
         if think is not None:
             kwargs["think"] = think
-        return self.client.chat(**kwargs)
+        return await self.client.chat(**kwargs)
 
-    def list_models(self) -> list[str]:
+    async def list_models(self) -> list[str]:
         from pydantic import ValidationError
         try:
-            response = self.client.list()
+            response = await self.client.list()
             return [m.model for m in response.models]
         except ValidationError:
-            # Some servers (e.g. llama.cpp's ollama compat) return partial schema
-            raw = self.client._request_raw('GET', '/api/tags')
-            data = raw.json()
+            # Some servers (e.g. llama.cpp's ollama compat) return partial schema.
+            # Fall back to a direct httpx call rather than ollama's private API.
+            url = f"{self.host.rstrip('/')}/api/tags"
+            async with httpx.AsyncClient(verify=self.verify_ssl) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
             return [m.get("model", m.get("name", "")) for m in data.get("models", [])]
 
     def extract_chunk(self, chunk) -> tuple[str, str]:
@@ -59,5 +72,5 @@ class OllamaBackend:
         self._context_tokens = tokens
         return content, tokens
 
-    def get_info(self) -> dict:
+    async def get_info(self) -> dict:
         return {}

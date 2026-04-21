@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
+import os
 import sys
 import tempfile
 import time
@@ -17,7 +18,7 @@ from textual.containers import Vertical
 from textual.events import Click
 from textual.widgets import Footer, Input, Static
 
-from ochat.backend import OllamaBackend, OpenAIBackend, LlamaCppBackend, AutoBackend
+from ochat.backend import AutoBackend, LlamaCppBackend, OllamaBackend, OpenAIBackend
 from ochat.commands import CommandsMixin
 from ochat.config import (
     CONFIG_DIR,
@@ -91,9 +92,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         self.config_name = config_name
         self.host = host or "http://localhost:11434"
         self.verify_ssl = verify_ssl
-        self.backend_type = backend_type
-        self.backend = self._create_backend(backend_type, host or "http://localhost:11434", verify_ssl)
-        self.api_mode = backend_type  # "ollama", "openai", "llama_cpp", "auto"
+        self.backend = self._create_backend(backend_type, host or "http://localhost:11434", verify_ssl, num_ctx)
         self.messages: list[dict] = []
         self.is_generating = False
         self.streaming = streaming
@@ -110,17 +109,17 @@ class OChat(CommandsMixin, GenerationMixin, App):
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
 
-    def _create_backend(self, backend_type: str, host: str, verify_ssl: bool):
+    def _create_backend(self, backend_type: str, host: str, verify_ssl: bool, num_ctx: int):
         """Create backend instance based on type."""
         match backend_type:
             case "ollama":
-                return OllamaBackend(host=host, verify_ssl=verify_ssl)
+                return OllamaBackend(host=host, verify_ssl=verify_ssl, num_ctx=num_ctx)
             case "openai":
                 return OpenAIBackend(host=host, verify_ssl=verify_ssl)
             case "llama_cpp":
                 return LlamaCppBackend(host=host, verify_ssl=verify_ssl)
             case "auto":
-                return AutoBackend(host=host, verify_ssl=verify_ssl)
+                return AutoBackend(host=host, verify_ssl=verify_ssl, num_ctx=num_ctx)
             case _:
                 raise ValueError(f"Unknown backend type: {backend_type}")
 
@@ -186,10 +185,10 @@ class OChat(CommandsMixin, GenerationMixin, App):
 
     def _context_pct(self) -> float:
         """Context usage as percentage (real tokens when available)."""
-        if self.backend_type == "openai":
+        if self.backend.type == "openai":
             return 0.0
         tokens = self._real_context_tokens()
-        if self.backend_type == "llama_cpp":
+        if self.backend.type == "llama_cpp":
             n_ctx = self.backend.n_ctx
         else:
             n_ctx = self.num_ctx
@@ -201,7 +200,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         msg_count = len([m for m in self.messages if m["role"] != "system"])
         real_tokens = self._real_context_tokens()
         pct = self._context_pct()
-        if self.backend_type == "llama_cpp":
+        if self.backend.type == "llama_cpp":
             ctx_label = f"n_ctx: {self.backend.n_ctx} (server)"
         else:
             ctx_label = f"context: {self.num_ctx}"
@@ -209,11 +208,11 @@ class OChat(CommandsMixin, GenerationMixin, App):
         return f"Messages: {msg_count} | Tokens used: {prefix}{real_tokens} ({pct:.0f}%) | {ctx_label}"
 
     def _status_text(self, extra: str = "") -> str:
-        if self.backend_type == "auto":
+        if self.backend.type == "auto":
             base = f"{self.model} (auto)"
-        elif self.backend_type == "openai":
+        elif self.backend.type == "openai":
             base = f"{self.model} (openai)"
-        elif self.backend_type == "llama_cpp":
+        elif self.backend.type == "llama_cpp":
             base = f"{self.model} (llama.cpp)"
         else:
             base = f"{self.model} | ctx:{self.num_ctx}"
@@ -249,11 +248,10 @@ class OChat(CommandsMixin, GenerationMixin, App):
 
         mode_label = ""
         try:
-            await asyncio.to_thread(self.backend.list_models)
-            self.api_mode = self.backend.type
-            _log.info("Connected in %s mode", self.api_mode)
-            if self.backend_type == "auto":
-                mode_label = f"Connected ({self.api_mode})"
+            await self.backend.list_models()
+            _log.info("Connected in %s mode", self.backend.type)
+            if isinstance(self.backend, AutoBackend):
+                mode_label = f"Connected ({self.backend.type})"
             else:
                 mode_label = "Connected"
         except Exception as e:
@@ -428,7 +426,12 @@ def main():
 
     if args.debug:
         log_file = Path(tempfile.gettempdir()) / f"ochat-{datetime.now():%Y%m%d-%H%M%S}.log"
-        handler = logging.FileHandler(str(log_file))
+        # Create log file with 0600 perms to avoid leaking prompts on shared tmpfs
+        old_umask = os.umask(0o077)
+        try:
+            handler = logging.FileHandler(str(log_file))
+        finally:
+            os.umask(old_umask)
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
         logger = logging.getLogger("ochat")
         logger.setLevel(logging.DEBUG)

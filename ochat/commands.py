@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING, Any
 
 from textual.widgets import Input, Static
 
@@ -19,7 +21,7 @@ from ochat.config import (
     switch_config_to_default,
     update_config,
 )
-from ochat.generation import _STREAM_DONE, _clean_impersonate_response
+from ochat.generation import _clean_impersonate_response
 from ochat.widgets import ChatContainer, Message
 
 _log = logging.getLogger(__name__)
@@ -27,6 +29,68 @@ _log = logging.getLogger(__name__)
 
 class CommandsMixin:
     """Mixin providing slash command handling for OChat."""
+
+    # Type-check-only declarations: these attributes and methods are actually
+    # provided by the composed OChat class (see ochat.app.OChat) — including
+    # its GenerationMixin half. Declaring them here satisfies pyright without
+    # runtime cost. Never instantiate CommandsMixin directly — it is a pure mixin.
+    # pylint: disable=missing-function-docstring,unused-argument
+    if TYPE_CHECKING:
+        # --- state owned by OChat.__init__ ---
+        model: str
+        messages: list[dict]
+        is_generating: bool
+        streaming: bool
+        auto_suggest: bool
+        append_local_prompt: bool
+        personality_name: str | None
+        system_prompt: str | None
+        config_name: str
+        sys_instructions: dict
+        last_gen_time: float
+        last_tokens: int
+        last_ttft: float
+        SPINNER_FRAMES: list[str]
+
+        # --- methods defined on OChat ---
+        # Stub bodies raise NotImplementedError so pylint/astroid don't treat
+        # them as no-op shadows of the real implementations on OChat.
+        def _context_info(self) -> str:
+            raise NotImplementedError
+        def _generating_lock(self) -> AbstractAsyncContextManager[None]:
+            raise NotImplementedError
+        def _status_text(self, extra: str = "") -> str:
+            raise NotImplementedError
+        def _reset_stats(self) -> None:
+            raise NotImplementedError
+        async def _show_system_message(self, text: str) -> None:
+            raise NotImplementedError
+        def action_clear(self) -> None:
+            raise NotImplementedError
+
+        # --- methods from GenerationMixin (also composed on OChat) ---
+        async def _chat_call(self, messages: list[dict], stream: bool) -> Any:
+            raise NotImplementedError
+        def _extract_chunk(self, chunk: Any) -> tuple[str, str]:
+            raise NotImplementedError
+        def _extract_result(self, result: Any) -> tuple[str, int]:
+            raise NotImplementedError
+        async def _generate_response(self) -> None:
+            raise NotImplementedError
+        async def _start_stream(
+            self, messages: list[dict], msg: Any, status: Any, start_time: float,
+        ) -> tuple[Any, Any]:
+            raise NotImplementedError
+
+        # --- subset of textual.app.App surface actually used here ---
+        def query_one(self, selector: str, expect_type: type | None = None) -> Any:
+            raise NotImplementedError
+        def notify(self, message: str, *, timeout: float = 5.0) -> None:
+            raise NotImplementedError
+        def copy_to_clipboard(self, text: str) -> None:
+            raise NotImplementedError
+        def exit(self, result: Any = None) -> None:
+            raise NotImplementedError
 
     async def _handle_command(self, raw_cmd: str) -> bool:
         """Handle slash commands. Returns True if command was handled."""
@@ -261,9 +325,9 @@ class CommandsMixin:
         self.exit()
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    async def _handle_impersonate(self) -> None:
-        """Generate a response as if the user was speaking, put it in input."""
-        _log.debug("Impersonate started")
+    async def _run_impersonate(self, instruction_key: str, label: str, status_label: str) -> None:
+        """Shared impersonate logic: generate a user response via LLM, put it in input."""
+        _log.debug("%s started", label)
         if self.is_generating:
             return
 
@@ -279,25 +343,27 @@ class CommandsMixin:
             impersonate_messages = self.messages.copy()
             impersonate_messages.append({
                 "role": "system",
-                "content": self.sys_instructions["impersonate"],
+                "content": self.sys_instructions[instruction_key],
             })
 
-            status.update(self._status_text("impersonating..."))
+            status.update(self._status_text(status_label))
             input_widget.value = "Impersonating..."
 
             try:
-                result = await asyncio.to_thread(
-                    lambda: self._chat_call(impersonate_messages, stream=False)
-                )
+                result = await self._chat_call(impersonate_messages, stream=False)
                 response, _ = self._extract_result(result)
                 response = _clean_impersonate_response(response)
-                _log.debug("Impersonate result: %s...", response[:100])
+                _log.debug("%s result: %s", label, response[:100])
                 input_widget.value = response
                 input_widget.cursor_position = len(response)
             except Exception as e:
-                _log.exception("Impersonate error")
+                _log.exception("%s error", label)
                 input_widget.value = ""
                 await self._show_system_message(f"Error: {e}")
+
+    async def _handle_impersonate(self) -> None:
+        """Generate a response as if the user was speaking, put it in input."""
+        await self._run_impersonate("impersonate", "Impersonate", "impersonating...")
 
     async def _handle_stats(self) -> None:
         """Show generation statistics."""
@@ -320,7 +386,13 @@ class CommandsMixin:
         await self._show_system_message("\n".join(lines))
 
     async def _handle_compact(self) -> None:
-        """Summarize conversation to free up context."""
+        """Summarize conversation to free up context.
+
+        TODO: the stream-buffer loop here overlaps with GenerationMixin._consume_chunks.
+        Factoring a shared helper would require callbacks for the UI updates (different
+        spinner label, different message widget semantics, different final handling) —
+        not clearly worth the abstraction cost. Revisit if a third consumer shows up.
+        """
         if self.is_generating:
             return
 
@@ -354,16 +426,13 @@ class CommandsMixin:
                 )
 
                 # Phase 2: buffer response, show progress
-                if first_chunk:
+                if first_chunk is not None:
                     _, content = self._extract_chunk(first_chunk)
                     if content:
                         summary += content
                         chunks += 1
 
-                    while True:
-                        chunk = await self._anext(stream)
-                        if chunk is _STREAM_DONE:
-                            break
+                    async for chunk in stream:
                         _, content = self._extract_chunk(chunk)
                         if content:
                             summary += content
@@ -398,40 +467,7 @@ class CommandsMixin:
 
     async def _handle_impersonate_short(self) -> None:
         """Generate a short user response suggestion, put it in input."""
-        _log.debug("Impersonate short started")
-        if self.is_generating:
-            return
-
-        if len([m for m in self.messages if m["role"] != "system"]) == 0:
-            await self._show_system_message("Need conversation context first")
-            return
-
-        async with self._generating_lock():
-            input_widget = self.query_one("#chat-input", Input)
-            status = self.query_one("#status", Static)
-
-            impersonate_messages = self.messages.copy()
-            impersonate_messages.append({
-                "role": "system",
-                "content": self.sys_instructions["impersonate_short"],
-            })
-
-            status.update(self._status_text("impersonating (short)..."))
-            input_widget.value = "Impersonating..."
-
-            try:
-                result = await asyncio.to_thread(
-                    lambda: self._chat_call(impersonate_messages, stream=False)
-                )
-                response, _ = self._extract_result(result)
-                response = _clean_impersonate_response(response)
-                _log.debug("Impersonate short result: %s", response[:100])
-                input_widget.value = response
-                input_widget.cursor_position = len(response)
-            except Exception as e:
-                _log.exception("Impersonate short error")
-                input_widget.value = ""
-                await self._show_system_message(f"Error: {e}")
+        await self._run_impersonate("impersonate_short", "Impersonate short", "impersonating (short)...")
 
     async def _handle_suggest_toggle(self) -> None:
         """Toggle auto_suggest setting."""

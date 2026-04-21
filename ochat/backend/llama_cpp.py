@@ -1,4 +1,4 @@
-"""Llama.cpp server backend (OpenAI-compatible with real usage tracking)."""
+"""Llama.cpp server backend (OpenAI-compatible with real usage tracking, async)."""
 
 import httpx
 import openai
@@ -11,10 +11,13 @@ class LlamaCppBackend:
         self.host = host
         self.verify_ssl = verify_ssl
         self._type = "llama_cpp"
-        self._client: openai.OpenAI | None = None
+        self._client: openai.AsyncOpenAI | None = None
         self._n_ctx: int = 0  # from /info
         self._context_tokens: int = 0  # from last call usage
         self._info_cache: dict | None = None
+
+    async def initialize(self) -> None:
+        return None
 
     @property
     def type(self) -> str:
@@ -22,8 +25,10 @@ class LlamaCppBackend:
 
     @property
     def n_ctx(self) -> int:
-        if self._info_cache is None:
-            self._refresh_info()
+        # NOTE: cannot fetch lazily here (sync property). Callers that need a
+        # correct n_ctx should await get_info() first — _show_greeting does this
+        # via list_models → but n_ctx specifically is refreshed on demand via
+        # get_info(). Returns 0 until get_info() has been awaited at least once.
         return self._n_ctx
 
     @property
@@ -31,30 +36,30 @@ class LlamaCppBackend:
         return self._context_tokens
 
     @property
-    def client(self):
+    def client(self) -> openai.AsyncOpenAI:
         if self._client is None:
             base_url = f"{self.host.rstrip('/')}/v1"
             if not self.verify_ssl:
-                http_client = httpx.Client(verify=False)
-                self._client = openai.OpenAI(
+                http_client = httpx.AsyncClient(verify=False)
+                self._client = openai.AsyncOpenAI(
                     base_url=base_url, api_key="llama.cpp",
                     http_client=http_client,
                 )
             else:
-                self._client = openai.OpenAI(
+                self._client = openai.AsyncOpenAI(
                     base_url=base_url, api_key="llama.cpp",
                 )
         return self._client
 
-    def _refresh_info(self) -> None:
+    async def _refresh_info(self) -> None:
         """Fetch n_ctx from /v1/models or /info (llama.cpp-specific)."""
         self._info_cache = {}
         self._n_ctx = 4096  # fallback
-        for path in ["/v1/models", "/info"]:
-            try:
-                url = f"{self.host.rstrip('/')}{path}"
-                with httpx.Client(verify=self.verify_ssl) as client:
-                    resp = client.get(url)
+        async with httpx.AsyncClient(verify=self.verify_ssl) as client:
+            for path in ["/v1/models", "/info"]:
+                try:
+                    url = f"{self.host.rstrip('/')}{path}"
+                    resp = await client.get(url)
                     resp.raise_for_status()
                     data = resp.json()
                     if path == "/v1/models":
@@ -67,38 +72,43 @@ class LlamaCppBackend:
                         self._info_cache = data
                         self._n_ctx = data.get("n_ctx", 4096)
                         return
-            except Exception:
-                continue
+                except Exception:
+                    continue
 
-    def get_info(self) -> dict:
+    async def get_info(self) -> dict:
         if self._info_cache is None:
-            self._refresh_info()
+            await self._refresh_info()
         return self._info_cache or {}
 
-    def chat(self, model: str, messages: list[dict], stream: bool,
-             num_ctx: int = 4096, model_options: dict | None = None) -> dict:
+    async def chat(self, model: str, messages: list[dict], stream: bool,
+                   num_ctx: int = 4096, model_options: dict | None = None):
         opts = {"n_ctx": num_ctx}
         if model_options:
             opts.update(model_options)
         extra_body = opts if opts else None
-        return self.client.chat.completions.create(
+        return await self.client.chat.completions.create(
             model=model, messages=messages, stream=stream,
             stream_options={"include_usage": True} if stream else None,
             extra_body=extra_body,
         )
 
-    def list_models(self) -> list[str]:
-        response = self.client.models.list()
+    async def list_models(self) -> list[str]:
+        # Also refresh n_ctx opportunistically — llama.cpp exposes it on /v1/models
+        if self._info_cache is None:
+            await self._refresh_info()
+        response = await self.client.models.list()
         return [m.id for m in response.data]
 
     def extract_chunk(self, chunk) -> tuple[str, str]:
         choices = chunk.choices
         if not choices:
+            # Last chunk carries only usage (no choices)
+            if chunk.usage is not None:
+                self._context_tokens = chunk.usage.prompt_tokens
             return "", ""
         delta = choices[0].delta
         reasoning = getattr(delta, "reasoning_content", "") or ""
         content = delta.content if (delta and delta.content) else ""
-        # Check if this is the last chunk with usage (delta is None when usage included)
         if chunk.usage is not None:
             self._context_tokens = chunk.usage.prompt_tokens
         return reasoning, content

@@ -1,5 +1,7 @@
 """Backend abstraction package for ochat."""
 
+import asyncio
+
 from ochat.backend.base import BackendProtocol
 from ochat.backend.ollama import OllamaBackend
 from ochat.backend.openai import OpenAIBackend
@@ -15,11 +17,12 @@ __all__ = [
 ]
 
 
-def create_backend(backend_type: str, host: str, verify_ssl: bool) -> BackendProtocol:
+def create_backend(backend_type: str, host: str, verify_ssl: bool,
+                   num_ctx: int = 4096) -> BackendProtocol:
     """Factory to create backend instances."""
     match backend_type:
         case "ollama":
-            return OllamaBackend(host=host, verify_ssl=verify_ssl)
+            return OllamaBackend(host=host, verify_ssl=verify_ssl, num_ctx=num_ctx)
         case "openai":
             return OpenAIBackend(host=host, verify_ssl=verify_ssl)
         case "llama_cpp":
@@ -31,14 +34,16 @@ def create_backend(backend_type: str, host: str, verify_ssl: bool) -> BackendPro
 class AutoBackend:
     """Automatically detect backend by trying Ollama first, then llama.cpp, then OpenAI-compatible."""
 
-    def __init__(self, host: str = "http://localhost:11434", verify_ssl: bool = True) -> None:
+    def __init__(self, host: str = "http://localhost:11434", verify_ssl: bool = True,
+                 num_ctx: int = 4096) -> None:
         self.host = host
         self.verify_ssl = verify_ssl
-        self._ollama = OllamaBackend(host=host, verify_ssl=verify_ssl)
+        self._ollama = OllamaBackend(host=host, verify_ssl=verify_ssl, num_ctx=num_ctx)
         self._llama_cpp = LlamaCppBackend(host=host, verify_ssl=verify_ssl)
         self._openai = OpenAIBackend(host=host, verify_ssl=verify_ssl)
         self._detected_backend: BackendProtocol | None = None
         self._type = "auto"
+        self._init_lock = asyncio.Lock()
 
     @property
     def type(self) -> str:
@@ -58,53 +63,61 @@ class AutoBackend:
             return self._detected_backend.n_ctx
         return 0
 
-    def _detect(self) -> BackendProtocol:
+    async def initialize(self) -> None:
+        """Detect the underlying backend exactly once (locked, idempotent)."""
         if self._detected_backend is not None:
-            return self._detected_backend
+            return
+        async with self._init_lock:
+            if self._detected_backend is not None:
+                return  # another coroutine won the race
 
-        # Try Ollama first
-        try:
-            self._ollama.list_models()
-            self._detected_backend = self._ollama
-            return self._detected_backend
-        except Exception:
-            pass
+            # Try Ollama first
+            try:
+                await self._ollama.list_models()
+                self._detected_backend = self._ollama
+                return
+            except Exception:
+                pass
 
-        # Try llama.cpp via /v1/models
-        try:
-            self._llama_cpp.list_models()
-            self._detected_backend = self._llama_cpp
-            return self._detected_backend
-        except Exception:
-            pass
+            # Try llama.cpp via /v1/models
+            try:
+                await self._llama_cpp.list_models()
+                self._detected_backend = self._llama_cpp
+                return
+            except Exception:
+                pass
 
-        # Try OpenAI-compatible
-        try:
-            self._openai.list_models()
-            self._detected_backend = self._openai
-            return self._detected_backend
-        except Exception:
-            pass
+            # Try OpenAI-compatible
+            try:
+                await self._openai.list_models()
+                self._detected_backend = self._openai
+                return
+            except Exception:
+                pass
 
-        raise RuntimeError("Could not detect backend: Ollama, llama.cpp, and OpenAI-compatible all failed")
+            raise RuntimeError("Could not detect backend: Ollama, llama.cpp, and OpenAI-compatible all failed")
 
-    def chat(self, model: str, messages: list[dict], stream: bool,
-             num_ctx: int = 4096, model_options: dict | None = None) -> dict:
-        backend = self._detect()
-        return backend.chat(model, messages, stream, num_ctx, model_options)
+    async def chat(self, model: str, messages: list[dict], stream: bool,
+                   num_ctx: int = 4096, model_options: dict | None = None):
+        await self.initialize()
+        assert self._detected_backend is not None
+        return await self._detected_backend.chat(model, messages, stream, num_ctx, model_options)
 
-    def list_models(self) -> list[str]:
-        backend = self._detect()
-        return backend.list_models()
+    async def list_models(self) -> list[str]:
+        await self.initialize()
+        assert self._detected_backend is not None
+        return await self._detected_backend.list_models()
 
     def extract_chunk(self, chunk) -> tuple[str, str]:
-        backend = self._detect()
-        return backend.extract_chunk(chunk)
+        # By the time chunks arrive, chat() has already been awaited → detection is done.
+        assert self._detected_backend is not None
+        return self._detected_backend.extract_chunk(chunk)
 
     def extract_result(self, result) -> tuple[str, int]:
-        backend = self._detect()
-        return backend.extract_result(result)
+        assert self._detected_backend is not None
+        return self._detected_backend.extract_result(result)
 
-    def get_info(self) -> dict:
-        backend = self._detect()
-        return backend.get_info()
+    async def get_info(self) -> dict:
+        await self.initialize()
+        assert self._detected_backend is not None
+        return await self._detected_backend.get_info()
