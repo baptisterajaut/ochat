@@ -1,4 +1,4 @@
-"""Main application module: OllamaChat App and main() entry point."""
+"""Main application module: OChat App and main() entry point."""
 
 import argparse
 import asyncio
