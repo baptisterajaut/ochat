@@ -33,7 +33,13 @@ from ochat.config import (
     update_config,
 )
 from ochat.generation import GenerationMixin
-from ochat.widgets import ChatContainer, CommandSuggester, Message
+from ochat.widgets import (
+    SPINNER_FRAMES,
+    ChatContainer,
+    CommandSuggester,
+    Message,
+    ReasoningBlock,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -54,7 +60,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
     """ochat - Simple TUI chat for any LLM backend."""
 
     CSS_PATH = "chat.tcss"
-    SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    SPINNER_FRAMES = SPINNER_FRAMES
     DEFAULT_PLACEHOLDER = "Message... (/help for commands)"
 
     BINDINGS = [
@@ -62,6 +68,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         Binding("ctrl+d", "quit", "Quit"),
         Binding("ctrl+l", "clear", "Clear"),
         Binding("ctrl+o", "toggle_streaming", "Stream"),
+        Binding("ctrl+t", "toggle_thinking", "Think"),
         Binding("escape", "cancel_or_quit", "Cancel/Quit"),
         Binding("tab", "focus_input", show=False, priority=True),
         Binding("shift+tab", "focus_input", show=False, priority=True),
@@ -80,6 +87,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         host: str | None = None,
         verify_ssl: bool = True,
         auto_suggest: bool = True,
+        thinking_enabled: bool = True,
         backend_type: str = "ollama",
     ) -> None:
         super().__init__()
@@ -97,6 +105,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         self.is_generating = False
         self.streaming = streaming
         self.auto_suggest = auto_suggest
+        self.thinking_enabled = thinking_enabled
         self._auto_suggest_task: asyncio.Task | None = None
         self._pending_suggestion: str = ""
         self._generation_cancelled = False
@@ -105,6 +114,12 @@ class OChat(CommandsMixin, GenerationMixin, App):
         self.last_tokens = 0
         self.last_ttft = 0.0
         self._context_warning_shown = False
+        # Reasoning collapse preference — new assistant messages start
+        # with this state. Collapsed by default (spinner while
+        # reasoning, doesn't clutter the chat). Click on the placeholder
+        # to expand; the preference is persisted for subsequent
+        # messages.
+        self._reasoning_collapsed_pref = True
         self.sys_instructions = self._load_system_instructions()
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
@@ -184,26 +199,29 @@ class OChat(CommandsMixin, GenerationMixin, App):
             input_widget.focus()
 
     def _context_pct(self) -> float:
-        """Context usage as percentage (real tokens when available)."""
+        """Context usage as percentage (real tokens when available).
+
+        User's configured `num_ctx` is always the source of truth — the
+        server's reported n_ctx is informational only. llama.cpp in
+        particular exposes n_ctx in various places (/props, meta fields)
+        that we don't parse reliably, so falling back to 4096 was giving
+        wrong percentages for users with bigger windows configured.
+        """
         if self.backend.type == "openai":
             return 0.0
         tokens = self._real_context_tokens()
-        if self.backend.type == "llama_cpp":
-            n_ctx = self.backend.n_ctx
-        else:
-            n_ctx = self.num_ctx
-        if n_ctx <= 0:
+        if self.num_ctx <= 0:
             return 0.0
-        return tokens / n_ctx * 100
+        return tokens / self.num_ctx * 100
 
     def _context_info(self) -> str:
         msg_count = len([m for m in self.messages if m["role"] != "system"])
         real_tokens = self._real_context_tokens()
         pct = self._context_pct()
-        if self.backend.type == "llama_cpp":
-            ctx_label = f"n_ctx: {self.backend.n_ctx} (server)"
-        else:
-            ctx_label = f"context: {self.num_ctx}"
+        ctx_label = f"context: {self.num_ctx}"
+        if self.backend.type == "llama_cpp" and self.backend.n_ctx > 0 \
+                and self.backend.n_ctx != self.num_ctx:
+            ctx_label += f" (server reports {self.backend.n_ctx})"
         prefix = "" if self.backend.context_tokens > 0 else "~"
         return f"Messages: {msg_count} | Tokens used: {prefix}{real_tokens} ({pct:.0f}%) | {ctx_label}"
 
@@ -240,6 +258,14 @@ class OChat(CommandsMixin, GenerationMixin, App):
     def on_click(self, _event: Click) -> None:
         """Keep focus on input when clicking anywhere."""
         self.query_one("#chat-input", Input).focus()
+
+    def on_reasoning_block_collapse_changed(
+        self, event: ReasoningBlock.CollapseChanged
+    ) -> None:
+        """Persist user's collapse preference so new assistant messages
+        start in the same state.
+        """
+        self._reasoning_collapsed_pref = event.collapsed
 
     async def _show_greeting(self) -> None:
         """Show greeting with ASCII art after validating connection."""
@@ -351,6 +377,13 @@ class OChat(CommandsMixin, GenerationMixin, App):
         update_config(streaming=self.streaming)
         mode = "ON" if self.streaming else "OFF"
         self.notify(f"Streaming: {mode}", timeout=2)
+
+    def action_toggle_thinking(self) -> None:
+        """Toggle reasoning/thinking at inference level."""
+        self.thinking_enabled = not self.thinking_enabled
+        update_config(thinking_enabled=self.thinking_enabled)
+        mode = "ON" if self.thinking_enabled else "OFF"
+        self.notify(f"Thinking: {mode}", timeout=2)
 
     def action_clear(self) -> None:
         """Clear chat history."""
@@ -493,6 +526,7 @@ def main():
         host=host,
         verify_ssl=config["verify_ssl"],
         auto_suggest=config["auto_suggest"],
+        thinking_enabled=config["thinking_enabled"],
         backend_type=config["backend"],
     )
     try:

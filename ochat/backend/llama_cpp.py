@@ -51,29 +51,54 @@ class LlamaCppBackend:
                 )
         return self._client
 
+    @staticmethod
+    def _n_ctx_from_props(data: dict) -> int:
+        # Field names vary across llama.cpp versions: older expose n_ctx
+        # directly; newer nest under default_generation_settings.
+        gen = data.get("default_generation_settings") or {}
+        return (
+            data.get("n_ctx")
+            or gen.get("n_ctx")
+            or gen.get("n_ctx_per_seq")
+            or 0
+        )
+
+    @staticmethod
+    def _n_ctx_from_models(data: dict) -> int:
+        models_data = data.get("data") or []
+        if not models_data:
+            return 0
+        meta = models_data[0].get("meta") or {}
+        return models_data[0].get("n_ctx") or meta.get("n_ctx_train") or 0
+
+    async def _fetch_json(self, client: httpx.AsyncClient, path: str) -> dict | None:
+        try:
+            resp = await client.get(f"{self.host.rstrip('/')}{path}")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+
     async def _refresh_info(self) -> None:
-        """Fetch n_ctx from /v1/models or /info (llama.cpp-specific)."""
+        """Fetch n_ctx from llama.cpp server.
+
+        /props is tried first (llama.cpp-specific, exposes the actual
+        configured context size). /v1/models is the fallback. 0 means
+        "unknown" — callers fall back to the user's configured num_ctx,
+        which is the source of truth anyway.
+        """
         self._info_cache = {}
-        self._n_ctx = 4096  # fallback
+        self._n_ctx = 0
         async with httpx.AsyncClient(verify=self.verify_ssl) as client:
-            for path in ["/v1/models", "/info"]:
-                try:
-                    url = f"{self.host.rstrip('/')}{path}"
-                    resp = await client.get(url)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if path == "/v1/models":
-                        models_data = data.get("data", [])
-                        if models_data and "n_ctx" in models_data[0]:
-                            self._n_ctx = models_data[0]["n_ctx"]
-                            return
-                        # n_ctx not exposed on /v1/models, try /info
-                    else:
-                        self._info_cache = data
-                        self._n_ctx = data.get("n_ctx", 4096)
-                        return
-                except Exception:
-                    continue
+            props = await self._fetch_json(client, "/props")
+            if props is not None:
+                self._info_cache = props
+                self._n_ctx = self._n_ctx_from_props(props)
+                if self._n_ctx:
+                    return
+            models = await self._fetch_json(client, "/v1/models")
+            if models is not None:
+                self._n_ctx = self._n_ctx_from_models(models)
 
     async def get_info(self) -> dict:
         if self._info_cache is None:
@@ -81,10 +106,14 @@ class LlamaCppBackend:
         return self._info_cache or {}
 
     async def chat(self, model: str, messages: list[dict], stream: bool,
-                   num_ctx: int = 4096, model_options: dict | None = None):
-        opts = {"n_ctx": num_ctx}
+                   num_ctx: int = 4096, model_options: dict | None = None,
+                   thinking: bool | None = None):
+        opts: dict = {"n_ctx": num_ctx}
         if model_options:
             opts.update(model_options)
+        if thinking is not None:
+            # Qwen3 / DeepSeek chat template support for reasoning toggle
+            opts.setdefault("chat_template_kwargs", {})["enable_thinking"] = thinking
         extra_body = opts if opts else None
         return await self.client.chat.completions.create(
             model=model, messages=messages, stream=stream,

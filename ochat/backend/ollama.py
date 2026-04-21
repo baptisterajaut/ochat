@@ -34,13 +34,16 @@ class OllamaBackend:
         return self._context_tokens
 
     async def chat(self, model: str, messages: list[dict], stream: bool,
-                   num_ctx: int = 4096, model_options: dict | None = None):
+                   num_ctx: int = 4096, model_options: dict | None = None,
+                   thinking: bool | None = None):
         opts = {"num_ctx": num_ctx, **(model_options or {})}
-        # `think` is a top-level kwarg in ollama-python, not an option
-        think = opts.pop("think", None)
+        # `think` is a top-level kwarg in ollama-python, not an option.
+        # Explicit `thinking` arg wins over anything in model_options.
+        think_from_opts = opts.pop("think", None)
+        effective_think = thinking if thinking is not None else think_from_opts
         kwargs = {"model": model, "messages": messages, "stream": stream, "options": opts}
-        if think is not None:
-            kwargs["think"] = think
+        if effective_think is not None:
+            kwargs["think"] = effective_think
         return await self.client.chat(**kwargs)
 
     async def list_models(self) -> list[str]:

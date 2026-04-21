@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "streaming": True,
     "verify_ssl": True,
     "auto_suggest": True,
+    "thinking_enabled": True,
     "model_options": {},
     "config_name": "",
     "backend": "ollama",
@@ -116,6 +117,7 @@ def load_config(config_file: Path | None = None) -> dict:
         config["append_local_prompt"] = parser.getboolean("defaults", "append_local_prompt", fallback=config["append_local_prompt"])
         config["streaming"] = parser.getboolean("defaults", "streaming", fallback=config["streaming"])
         config["auto_suggest"] = parser.getboolean("defaults", "auto_suggest", fallback=config["auto_suggest"])
+        config["thinking_enabled"] = parser.getboolean("defaults", "thinking_enabled", fallback=config["thinking_enabled"])
         config["config_name"] = parser.get("defaults", "config_name", fallback=config["config_name"])
         config["backend"] = parser.get("defaults", "backend", fallback=config["backend"])
 
@@ -153,6 +155,7 @@ def save_config(
     config_file: Path | None = None,
     verify_ssl: bool = True,
     auto_suggest: bool = True,
+    thinking_enabled: bool = True,
     backend: str = "ollama",
 ) -> None:
     """Save configuration to file."""
@@ -170,6 +173,7 @@ def save_config(
         "append_local_prompt": str(append_local_prompt).lower(),
         "streaming": str(streaming).lower(),
         "auto_suggest": str(auto_suggest).lower(),
+        "thinking_enabled": str(thinking_enabled).lower(),
         "backend": backend,
     }
     if config_name:
@@ -201,6 +205,7 @@ def save_config_dict(config: dict, config_file: Path | None = None, **overrides)
         config_file=config_file,
         verify_ssl=merged.get("verify_ssl", True),
         auto_suggest=merged.get("auto_suggest", True),
+        thinking_enabled=merged.get("thinking_enabled", True),
         backend=merged.get("backend", "ollama"),
     )
 

@@ -98,10 +98,13 @@ class AutoBackend:
             raise RuntimeError("Could not detect backend: Ollama, llama.cpp, and OpenAI-compatible all failed")
 
     async def chat(self, model: str, messages: list[dict], stream: bool,
-                   num_ctx: int = 4096, model_options: dict | None = None):
+                   num_ctx: int = 4096, model_options: dict | None = None,
+                   thinking: bool | None = None):
         await self.initialize()
         assert self._detected_backend is not None
-        return await self._detected_backend.chat(model, messages, stream, num_ctx, model_options)
+        return await self._detected_backend.chat(
+            model, messages, stream, num_ctx, model_options, thinking=thinking,
+        )
 
     async def list_models(self) -> list[str]:
         await self.initialize()

@@ -16,11 +16,16 @@ class BackendProtocol(Protocol):
         ...
 
     async def chat(self, model: str, messages: list[dict], stream: bool,
-                   num_ctx: int = 4096, model_options: dict | None = None):
+                   num_ctx: int = 4096, model_options: dict | None = None,
+                   thinking: bool | None = None):
         """Make a chat completion call.
 
         When stream=True, returns an async iterator yielding chunks.
         When stream=False, returns a single result object.
+
+        `thinking`: None = server default; True/False = force-enable/disable
+        reasoning for models that support it (Qwen3, DeepSeek-R1, etc.).
+        Each backend maps this to its native mechanism.
         """
         ...
 

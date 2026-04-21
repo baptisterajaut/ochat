@@ -47,12 +47,20 @@ class OpenAIBackend:
         return self._client
 
     async def chat(self, model: str, messages: list[dict], stream: bool,
-                   num_ctx: int = 4096, model_options: dict | None = None):
+                   num_ctx: int = 4096, model_options: dict | None = None,
+                   thinking: bool | None = None):
         # num_ctx and model_options are ignored by OpenAI backend — kept for
         # BackendProtocol interface compat. Acknowledge to silence unused-param.
         _ = num_ctx, model_options
+        extra_body = None
+        if thinking is not None:
+            # Servers supporting Qwen3-style thinking toggle via chat_template_kwargs
+            # (vLLM, LM Studio with Qwen3, etc.). Real OpenAI API ignores/rejects —
+            # only sent when caller explicitly asks.
+            extra_body = {"chat_template_kwargs": {"enable_thinking": thinking}}
         return await self.client.chat.completions.create(
             model=model, messages=messages, stream=stream,
+            extra_body=extra_body,
         )
 
     async def list_models(self) -> list[str]:

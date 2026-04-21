@@ -16,10 +16,6 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-# Minimum interval between Markdown widget updates during streaming.
-# mistune re-parses the full buffer on every update → throttle to avoid O(n²) blowup.
-_MARKDOWN_RENDER_INTERVAL = 0.05  # seconds
-
 
 def _clean_impersonate_response(response: str) -> str:
     """Strip quotes and collapse whitespace from impersonate results."""
@@ -47,6 +43,7 @@ class GenerationMixin:
         is_generating: bool
         streaming: bool
         auto_suggest: bool
+        thinking_enabled: bool
         sys_instructions: dict
         last_gen_time: float
         last_tokens: int
@@ -56,6 +53,7 @@ class GenerationMixin:
         _pending_suggestion: str
         _generation_cancelled: bool
         _context_warning_shown: bool
+        _reasoning_collapsed_pref: bool
         SPINNER_FRAMES: list[str]
 
         # --- methods defined on OChat ---
@@ -74,8 +72,12 @@ class GenerationMixin:
         def query_one(self, selector: str, expect_type: type | None = None) -> Any:
             raise NotImplementedError
 
-    async def _chat_call(self, messages: list[dict], stream: bool):
-        return await self.backend.chat(self.model, messages, stream, self.num_ctx, self.model_options)
+    async def _chat_call(self, messages: list[dict], stream: bool,
+                          thinking: bool | None = None):
+        return await self.backend.chat(
+            self.model, messages, stream, self.num_ctx, self.model_options,
+            thinking=thinking,
+        )
 
     def _extract_chunk(self, chunk) -> tuple[str, str]:
         """Extract (reasoning, content) from a streaming chunk."""
@@ -91,7 +93,10 @@ class GenerationMixin:
         chat = self.query_one("#chat", ChatContainer)
         status = self.query_one("#status", Static)
 
-        assistant_msg = Message("...", "assistant")
+        assistant_msg = Message(
+            "...", "assistant",
+            reasoning_collapsed=self._reasoning_collapsed_pref,
+        )
         await chat.mount(assistant_msg)
         chat.scroll_end(animate=False)
         await asyncio.sleep(0)  # Let UI refresh
@@ -142,14 +147,28 @@ class GenerationMixin:
         )
         self.last_ttft = time.time() - start_time if not self._generation_cancelled else 0.0
 
+        # Clear spinner leftover, then start the incremental stream. The prefix
+        # `● ` goes in via update_content so it's included in the parsed source
+        # but not re-parsed on every chunk.
+        if self.streaming:
+            await assistant_msg.update_content("● ")
+            assistant_msg.start_content_stream()
+
         text, reasoning, tokens = "", "", 0
         if first_chunk is not None and not self._generation_cancelled:
             r, c = self._extract_chunk(first_chunk)
+            if r and self.streaming:
+                assistant_msg.start_reasoning_stream()
+                await assistant_msg.append_reasoning(r)
+                reasoning += r
+            elif r:
+                reasoning += r
             if c:
                 text += c
                 tokens += 1
-            if r:
-                reasoning += r
+                if self.streaming:
+                    assistant_msg.mark_reasoning_idle()
+                    await assistant_msg.append_content(c)
 
         return await self._consume_chunks(
             stream, assistant_msg, chat, status, start_time, text, reasoning, tokens,
@@ -159,6 +178,7 @@ class GenerationMixin:
                                  text, reasoning, tokens, cancelled):
         """Render the final message state and commit to history."""
         if cancelled:
+            # update() stops the active stream and replaces content.
             await assistant_msg.update("*[cancelled]*", reasoning=reasoning)
             if text:
                 self.messages.append({"role": "assistant", "content": text})
@@ -166,8 +186,10 @@ class GenerationMixin:
 
         if text:
             if self.streaming:
-                # Throttling may have skipped the last chunk — ensure final render is complete.
-                await assistant_msg.update(f"● {text}", reasoning=reasoning)
+                # Streams already rendered both content and reasoning
+                # incrementally. Just stop them and scroll.
+                await assistant_msg._stop_stream()  # noqa: SLF001 — widget helper
+                await assistant_msg.stop_reasoning_stream()
             else:
                 think_time = time.time() - start_time
                 await assistant_msg.update(
@@ -187,14 +209,18 @@ class GenerationMixin:
                               start_time, response_text, response_reasoning, tokens_generated):
         """Consume stream chunks, updating UI. Returns (text, reasoning, tokens, cancelled).
 
-        Markdown widget updates are throttled (~50ms) to avoid O(n²) re-parsing
-        of the accumulated buffer. Status bar updates remain per-chunk (cheap).
+        Streaming mode: content and reasoning deltas both go to MarkdownStream
+        (incremental parse — only the trailing block re-renders per batch;
+        Textual coalesces writes when renders lag). Status bar stays throttled.
         """
-        last_render = 0.0
+        last_status_render = 0.0
+        last_spinner_render = 0.0
+        chunks_received = 0
         async for chunk in stream:
             if self._generation_cancelled:
                 return response_text, response_reasoning, tokens_generated, True
 
+            chunks_received += 1
             reasoning, content = self._extract_chunk(chunk)
             if content:
                 response_text += content
@@ -205,27 +231,49 @@ class GenerationMixin:
             elapsed = time.time() - start_time
 
             if self.streaming:
-                now = time.monotonic()
-                if (content or reasoning) and (now - last_render) >= _MARKDOWN_RENDER_INTERVAL:
-                    await assistant_msg.update(
-                        f"● {response_text}",
-                        reasoning=response_reasoning,
-                    )
+                if content:
+                    assistant_msg.mark_reasoning_idle()
+                    await assistant_msg.append_content(content)
                     chat.scroll_end(animate=False)
-                    last_render = now
-                tps = tokens_generated / elapsed if elapsed > 0 else 0
-                status.update(self._status_text(
-                    f"generating... {elapsed:.1f}s ({tokens_generated}tok, {tps:.1f}t/s)"
-                ))
+                if reasoning:
+                    # Lazy start — reasoning block stays hidden until first token.
+                    assistant_msg.start_reasoning_stream()
+                    await assistant_msg.append_reasoning(reasoning)
+                    chat.scroll_end(animate=False)
+                now = time.monotonic()
+                if now - last_status_render >= 0.2:
+                    tps = tokens_generated / elapsed if elapsed > 0 else 0
+                    status.update(self._status_text(
+                        f"generating... {elapsed:.1f}s ({tokens_generated}tok, {tps:.1f}t/s)"
+                    ))
+                    last_status_render = now
             else:
+                # Non-stream: show only the spinner in the body. Reasoning
+                # is deliberately NOT forwarded per-chunk — each call to
+                # Message.update(reasoning=X) does a full Markdown replace
+                # on the reasoning block. Throttle the body spinner too:
+                # update_content runs Markdown.update (parse + remove &
+                # mount all blocks, ~20-50ms per call), so doing it at
+                # chunk-rate (up to 100 Hz) starves the event loop and
+                # causes the UI to lag seconds behind the stream. 10 Hz is
+                # indistinguishable to the eye and leaves headroom.
+                now = time.monotonic()
+                if now - last_spinner_render < 0.1:
+                    continue
+                last_spinner_render = now
+                if tokens_generated > 0:
+                    phase = "on it"
+                elif response_reasoning:
+                    phase = "thinking"
+                else:
+                    phase = "waiting for first token"
                 frame = self.SPINNER_FRAMES[int(elapsed * 10) % len(self.SPINNER_FRAMES)]
-                await assistant_msg.update(
-                    f"● {frame} thinking... {elapsed:.1f}s ({tokens_generated} chunks)",
-                    reasoning=response_reasoning,
+                await assistant_msg.update_content(
+                    f"● {frame} {phase}... {elapsed:.1f}s ({chunks_received} chunks)",
                 )
                 chat.scroll_end(animate=False)
                 status.update(self._status_text(
-                    f"thinking... {elapsed:.1f}s ({tokens_generated} chunks)"
+                    f"{phase}... {elapsed:.1f}s ({chunks_received} chunks)"
                 ))
 
         return response_text, response_reasoning, tokens_generated, self._generation_cancelled
@@ -239,7 +287,9 @@ class GenerationMixin:
             self._animate_spinner(msg, status, start_time, "waiting for first token")
         )
         try:
-            stream = await self._chat_call(messages, stream=True)
+            # thinking: None=default; False=force-off via user `/thinking` toggle
+            thinking = None if self.thinking_enabled else False
+            stream = await self._chat_call(messages, stream=True, thinking=thinking)
             first_chunk = await self._first_chunk(stream)
         finally:
             spinner.cancel()
@@ -261,10 +311,11 @@ class GenerationMixin:
         try:
             suggest_messages = self.messages.copy()
             suggest_messages.append({
-                "role": "system",
+                "role": "user",
                 "content": self.sys_instructions["impersonate_short"],
             })
-            result = await self._chat_call(suggest_messages, stream=False)
+            # thinking=False: meta-prompt, reasoning tokens are pure waste here
+            result = await self._chat_call(suggest_messages, stream=False, thinking=False)
             response, _ = self._extract_result(result)
             response = _clean_impersonate_response(response)
 
@@ -277,15 +328,20 @@ class GenerationMixin:
             _log.debug("Auto-suggest failed", exc_info=True)
 
     async def _animate_spinner(self, msg: Message, status: Static, start_time: float, label: str) -> None:
-        """Animate spinner indicator with given label."""
+        """Animate spinner indicator with given label.
+
+        Uses update_content (not update) — each tick is just a body refresh,
+        we don't want to stop the reasoning stream or post CollapseChanged
+        events at 10 Hz.
+        """
         i = 0
         while True:
             elapsed = time.time() - start_time
             if self._generation_cancelled:
-                await msg.update(f"● {self.SPINNER_FRAMES[i]} cancelling...")
+                await msg.update_content(f"● {self.SPINNER_FRAMES[i]} cancelling...")
                 status.update(self._status_text("cancelling..."))
             else:
-                await msg.update(f"● {self.SPINNER_FRAMES[i]} {label}...")
+                await msg.update_content(f"● {self.SPINNER_FRAMES[i]} {label}...")
                 status.update(self._status_text(f"{label}... {elapsed:.1f}s"))
             self.query_one("#chat", ChatContainer).scroll_end(animate=False)
             i = (i + 1) % len(self.SPINNER_FRAMES)

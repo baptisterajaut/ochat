@@ -42,6 +42,7 @@ class CommandsMixin:
         is_generating: bool
         streaming: bool
         auto_suggest: bool
+        thinking_enabled: bool
         append_local_prompt: bool
         personality_name: str | None
         system_prompt: str | None
@@ -69,7 +70,8 @@ class CommandsMixin:
             raise NotImplementedError
 
         # --- methods from GenerationMixin (also composed on OChat) ---
-        async def _chat_call(self, messages: list[dict], stream: bool) -> Any:
+        async def _chat_call(self, messages: list[dict], stream: bool,
+                              thinking: bool | None = None) -> Any:
             raise NotImplementedError
         def _extract_chunk(self, chunk: Any) -> tuple[str, str]:
             raise NotImplementedError
@@ -114,6 +116,7 @@ class CommandsMixin:
 - `/impersonate` or `/imp` - Generate user response suggestion
 - `/imps` - Short impersonate (suggestion-length)
 - `/suggest` - Toggle auto-suggest after responses
+- `/thinking` - Toggle reasoning on/off (ctrl+t)
 - `/project` - Toggle local prompt append (agent.md)
 - `/stats` or `/st` - Show generation statistics
 - `/compact` - Summarize conversation to free context
@@ -179,6 +182,10 @@ class CommandsMixin:
 
         elif cmd == "/suggest":
             await self._handle_suggest_toggle()
+            return True
+
+        elif cmd == "/thinking":
+            await self._handle_thinking_toggle()
             return True
 
         elif cmd in ("/stats", "/st"):
@@ -339,10 +346,13 @@ class CommandsMixin:
             input_widget = self.query_one("#chat-input", Input)
             status = self.query_one("#status", Static)
 
-            # Build messages with impersonate instruction
+            # Build messages with impersonate instruction.
+            # Role=user (not system) because trailing system messages are
+            # ignored by many chat templates (ChatML, Llama, etc.) — the model
+            # would just continue as assistant and echo its last turn.
             impersonate_messages = self.messages.copy()
             impersonate_messages.append({
-                "role": "system",
+                "role": "user",
                 "content": self.sys_instructions[instruction_key],
             })
 
@@ -350,7 +360,8 @@ class CommandsMixin:
             input_widget.value = "Impersonating..."
 
             try:
-                result = await self._chat_call(impersonate_messages, stream=False)
+                # thinking=False: meta-prompt, reasoning tokens waste time here
+                result = await self._chat_call(impersonate_messages, stream=False, thinking=False)
                 response, _ = self._extract_result(result)
                 response = _clean_impersonate_response(response)
                 _log.debug("%s result: %s", label, response[:100])
@@ -475,6 +486,13 @@ class CommandsMixin:
         update_config(auto_suggest=self.auto_suggest)
         status = "ON" if self.auto_suggest else "OFF"
         await self._show_system_message(f"Auto-suggest: **{status}**")
+
+    async def _handle_thinking_toggle(self) -> None:
+        """Toggle reasoning/thinking at inference level."""
+        self.thinking_enabled = not self.thinking_enabled
+        update_config(thinking_enabled=self.thinking_enabled)
+        status = "ON" if self.thinking_enabled else "OFF"
+        await self._show_system_message(f"Thinking: **{status}**")
 
     async def _handle_personality_command(self, arg: str) -> None:
         """Handle /personality command for listing and switching personalities."""

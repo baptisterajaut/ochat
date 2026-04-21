@@ -242,6 +242,18 @@ Average cyclomatic complexity: **B (5.1)** — no D or F.
 
 </details>
 
+## Performance notes
+
+Textual is lovely for building TUIs but its default paths don't hold up under realistic LLM streaming workloads — long streamed Markdown plus a hidden Chain-of-Thought block exposes a few pathologies that had to be worked around to keep the UI responsive:
+
+- **Streaming Markdown rebuilds**: the stock `Markdown` widget re-parses the entire buffer on every `append()`, blocking the event loop on long reasoning. Subclassed to run the parse in a thread pool (`StreamingMarkdown`), so chunks keep flowing while mistune chews.
+- **`:hover` on large subtrees**: a plain `:hover` CSS rule on the reasoning block triggers a full stylesheet re-apply to every descendant on every mouse-move (thousands of `MarkdownBlock` widgets, deep selector matching). Replaced with inline-style toggles in `on_enter` / `on_leave` and manual descendant cache invalidation — zero cascade cost, uniform tint.
+- **Fire-and-forget `AwaitComplete`**: `Markdown.update()` returns an `AwaitComplete` that schedules its task via `asyncio.gather()` inside `__init__`. Calling it without `await` leaves an orphan task; at shutdown or lock contention you get `CancelledError was never retrieved` and can hang. Every call site now awaits.
+- **Full-replace vs. incremental in non-stream mode**: forwarding the accumulated reasoning to `Message.update(reasoning=...)` on every chunk did an O(chunks × len) Markdown re-parse + remove-then-mount of every block. Reasoning is now rendered once at finalize, and the spinner body update is throttled to 10 Hz (`Markdown.update` is ~20-50ms of DOM churn per call).
+- **Visual-style cache on descendants**: Textual caches per-widget composited colors in `_visual_style_cache`. Inline style changes on a parent don't invalidate children's caches, so hover tint would only apply to empty cells, not text cells. Fixed by walking descendants and calling `notify_style_update()` on hover enter/leave.
+
+Net effect: reasoning streams with reasoning collapsed stay indistinguishable from plain text, hover-on-reasoning no longer freezes the UI for minutes, and non-stream generations render in real time instead of catching up several seconds after completion.
+
 ## Alternatives
 
 If you want a more full-featured Ollama TUI, check out [parllama](https://github.com/paulrobello/parllama) and [oterm](https://github.com/ggozad/oterm). Both are capable and well-maintained. Their busier interfaces weren't to my taste — this project exists because I wanted a clean, single-screen interface with no panels or sidebars to manage.

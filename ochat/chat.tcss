@@ -27,10 +27,37 @@ ChatContainer {
     color: $text;
 }
 
-.message.assistant MarkdownBlockQuote {
+.reasoning-block {
+    height: auto;
+    margin: 0 0 1 0;
+    border-left: outer #555;
+    padding: 0 1;
+}
+
+/* Hover effect is applied via inline styles in ReasoningBlock.on_enter /
+   on_leave rather than a :hover rule. A CSS :hover on a container
+   triggers update_node_styles() on every descendant (full selector
+   re-match). With a long streamed reasoning the subtree holds thousands
+   of MarkdownBlock widgets, so the UI thread saturates on every
+   mouse-move. Inline styles refresh only the widget itself. */
+
+.reasoning-block .reasoning-body {
     color: #888;
     text-style: italic;
-    padding: 0 1;
+    height: auto;
+    background: transparent;
+}
+
+.reasoning-block .reasoning-body MarkdownParagraph {
+    color: #888;
+    text-style: italic;
+    margin: 0;
+}
+
+.reasoning-block .reasoning-placeholder {
+    color: #888;
+    text-style: italic;
+    height: 1;
 }
 
 .message.system-info {
