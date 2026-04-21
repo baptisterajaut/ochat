@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "auto_suggest": True,
     "model_options": {},
     "config_name": "",
+    "backend": "ollama",
 }
 
 
@@ -94,6 +95,7 @@ def load_config(config_file: Path | None = None) -> dict:
         config["streaming"] = parser.getboolean("defaults", "streaming", fallback=config["streaming"])
         config["auto_suggest"] = parser.getboolean("defaults", "auto_suggest", fallback=config["auto_suggest"])
         config["config_name"] = parser.get("defaults", "config_name", fallback=config["config_name"])
+        config["backend"] = parser.get("defaults", "backend", fallback=config["backend"])
 
         # Load model options (empty string = not set, any key allowed)
         if parser.has_section("model_options"):
@@ -129,6 +131,7 @@ def save_config(
     config_file: Path | None = None,
     verify_ssl: bool = True,
     auto_suggest: bool = True,
+    backend: str = "ollama",
 ) -> None:
     """Save configuration to file."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -145,6 +148,7 @@ def save_config(
         "append_local_prompt": str(append_local_prompt).lower(),
         "streaming": str(streaming).lower(),
         "auto_suggest": str(auto_suggest).lower(),
+        "backend": backend,
     }
     if config_name:
         defaults["config_name"] = config_name
@@ -289,28 +293,93 @@ def _backup_config_interactive(config: dict, default_name: str = "") -> None:
     print(f"Backed up to {backup_file.name}")
 
 
-def _connect_ollama(host: str, verify_ssl: bool) -> tuple[list[str], bool]:
-    """Connect to Ollama, handle SSL retry. Returns (models, verify_ssl)."""
-    try:
+def __connect_backend(host: str, backend_type: str, verify_ssl: bool) -> tuple[list[str], bool]:
+    """Connect to backend, handle SSL retry. Returns (models, verify_ssl)."""
+    from ochat.backend import OllamaBackend, OpenAIBackend, LlamaCppBackend
+    
+    if backend_type == "ollama":
         client = ollama.Client(host=host, verify=verify_ssl)
-        models_response = client.list()
-        return [m.model for m in models_response.models], verify_ssl
-    except Exception as e:
-        error_str = str(e).upper()
-        if host.startswith("https") and any(
-            kw in error_str for kw in ("SSL", "CERTIFICATE", "VERIFY")
-        ):
-            skip = input(
-                "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
-            ).strip().lower()
-            if skip in ("y", "yes"):
-                try:
-                    client = ollama.Client(host=host, verify=False)
-                    models_response = client.list()
-                    return [m.model for m in models_response.models], False
-                except Exception as e2:
-                    print(f"Connection error: {e2}")
-                    sys.exit(1)
+        try:
+            models_response = client.list()
+            return [m.model for m in models_response.models], verify_ssl
+        except Exception as e:
+            error_str = str(e).upper()
+            if host.startswith("https") and any(
+                kw in error_str for kw in ("SSL", "CERTIFICATE", "VERIFY")
+            ):
+                skip = input(
+                    "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
+                ).strip().lower()
+                if skip in ("y", "yes"):
+                    try:
+                        client = ollama.Client(host=host, verify=False)
+                        models_response = client.list()
+                        return [m.model for m in models_response.models], False
+                    except Exception as e2:
+                        print(f"Connection error: {e2}")
+                        sys.exit(1)
+            print(f"Connection error: {e}")
+            sys.exit(1)
+    
+    elif backend_type == "openai":
+        import httpx
+        import openai
+        base_url = f"{host.rstrip('/')}/v1"
+        client = openai.OpenAI(base_url=base_url, api_key="not-needed")
+        try:
+            response = client.models.list()
+            return [m.id for m in response.data], verify_ssl
+        except Exception as e:
+            error_str = str(e).upper()
+            if host.startswith("https") and any(
+                kw in error_str for kw in ("SSL", "CERTIFICATE", "VERIFY")
+            ):
+                skip = input(
+                    "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
+                ).strip().lower()
+                if skip in ("y", "yes"):
+                    try:
+                        http_client = httpx.Client(verify=False)
+                        client = openai.OpenAI(base_url=base_url, api_key="not-needed", http_client=http_client)
+                        response = client.models.list()
+                        return [m.id for m in response.data], False
+                    except Exception as e2:
+                        print(f"Connection error: {e2}")
+                        sys.exit(1)
+            print(f"Connection error: {e}")
+            sys.exit(1)
+    
+    elif backend_type == "llama_cpp":
+        import httpx
+        import openai
+        base_url = f"{host.rstrip('/')}/v1"
+        client = openai.OpenAI(base_url=base_url, api_key="llama.cpp")
+        try:
+            response = client.models.list()
+            return [m.id for m in response.data], verify_ssl
+        except Exception as e:
+            error_str = str(e).upper()
+            if host.startswith("https") and any(
+                kw in error_str for kw in ("SSL", "CERTIFICATE", "VERIFY")
+            ):
+                skip = input(
+                    "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
+                ).strip().lower()
+                if skip in ("y", "yes"):
+                    try:
+                        http_client = httpx.Client(verify=False)
+                        client = openai.OpenAI(base_url=base_url, api_key="llama.cpp", http_client=http_client)
+                        response = client.models.list()
+                        return [m.id for m in response.data], False
+                    except Exception as e2:
+                        print(f"Connection error: {e2}")
+                        sys.exit(1)
+            print(f"Connection error: {e}")
+            sys.exit(1)
+    
+    else:
+        print(f"Unknown backend type: {backend_type}")
+        sys.exit(1)
         print(f"Connection error: {e}")
         sys.exit(1)
 
@@ -354,24 +423,30 @@ def _input_positive_int(prompt: str, default: int) -> int:
 def run_setup(create_new: bool = False) -> None:
     """Run interactive setup wizard."""
     if create_new:
-        print("ollama-chat - Create new config profile\n")
+        print("ochat - Create new config profile\n")
         config = {**DEFAULT_CONFIG, "host": get_default_host()}
         config_existed = False
         old_config_name = ""
     else:
-        print("ollama-chat configuration\n")
+        print("ochat configuration\n")
         config_existed = CONFIG_FILE.exists()
         config = load_config()
         old_config_name = config.get("config_name", "")
 
-    # 1. Ask for host
-    default_host = config["host"]
-    host = input(f"Ollama host [{default_host}]: ").strip() or default_host
+    # 1. Ask for backend type
+    backends = ["ollama", "openai", "llama_cpp"]
+    default_backend = config.get("backend", "ollama")
+    backend_idx = backends.index(default_backend) + 1 if default_backend in backends else 1
+    backend = _select_numbered("backends", backends, backend_idx)
 
-    # 2. Connect and select model
+    # 2. Ask for host
+    default_host = config["host"]
+    host = input(f"Host [{default_host}]: ").strip() or default_host
+
+    # 3. Connect and select model
     verify_ssl = config.get("verify_ssl", True)
-    print("\nConnecting to Ollama...")
-    models, verify_ssl = _connect_ollama(host, verify_ssl)
+    print(f"\nConnecting to {backend.capitalize()}...")
+    models, verify_ssl = __connect_backend(host, backend, verify_ssl)
 
     if not models:
         print("No models found. Install one with 'ollama pull <model>'")
@@ -420,7 +495,7 @@ def run_setup(create_new: bool = False) -> None:
     # Common kwargs for save
     save_kwargs = dict(host=host, model=model, num_ctx=num_ctx,
                        personality=personality, append_local_prompt=append_local_prompt,
-                       verify_ssl=verify_ssl)
+                       verify_ssl=verify_ssl, backend=backend)
 
     if create_new:
         _save_new_profile(config, save_kwargs)
