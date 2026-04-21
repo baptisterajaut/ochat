@@ -31,7 +31,7 @@ ChatContainer {
     color: $text-muted;
     text-style: italic;
     padding: 0 1;
-    border-left: 1 $text-muted;
+    border-left: solid $text-muted;
 }
 
 .message.system-info {
