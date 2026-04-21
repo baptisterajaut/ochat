@@ -1,21 +1,36 @@
-"""Llama.cpp backend implementation."""
+"""Llama.cpp server backend (OpenAI-compatible with real usage tracking)."""
 
 import httpx
 import openai
 
+from .base import BackendProtocol
+
 
 class LlamaCppBackend:
-    """Backend for llama.cpp server (exposes OpenAI-compatible /v1/chat/completions)."""
+    """Backend for llama.cpp server (/v1/chat/completions + /info)."""
 
     def __init__(self, host: str = "http://localhost:8080", verify_ssl: bool = True) -> None:
         self.host = host
         self.verify_ssl = verify_ssl
         self._type = "llama_cpp"
-        self._client = None
+        self._client: openai.OpenAI | None = None
+        self._n_ctx: int = 0  # from /info
+        self._context_tokens: int = 0  # from last call usage
+        self._info_cache: dict | None = None
 
     @property
     def type(self) -> str:
         return self._type
+
+    @property
+    def n_ctx(self) -> int:
+        if self._n_ctx == 0:
+            self._refresh_info()
+        return self._n_ctx
+
+    @property
+    def context_tokens(self) -> int:
+        return self._context_tokens
 
     @property
     def client(self):
@@ -33,15 +48,34 @@ class LlamaCppBackend:
                 )
         return self._client
 
+    def _refresh_info(self) -> None:
+        """Fetch /info and cache n_ctx."""
+        try:
+            url = f"{self.host.rstrip('/')}/info"
+            with httpx.Client(verify=self.verify_ssl) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                self._info_cache = resp.json()
+                self._n_ctx = self._info_cache.get("n_ctx", 0)
+        except Exception:
+            self._info_cache = {}
+            self._n_ctx = 4096  # fallback
+
+    def get_info(self) -> dict:
+        if self._info_cache is None:
+            self._refresh_info()
+        return self._info_cache or {}
+
     def chat(self, model: str, messages: list[dict], stream: bool,
              num_ctx: int = 4096, model_options: dict | None = None) -> dict:
-        opts = {}
-        if num_ctx:
-            opts["n_ctx"] = num_ctx
+        opts = {"n_ctx": num_ctx}
         if model_options:
             opts.update(model_options)
+        extra_body = opts if opts else None
         return self.client.chat.completions.create(
-            model=model, messages=messages, stream=stream, extra_body=opts if opts else None,
+            model=model, messages=messages, stream=stream,
+            stream_options={"include_usage": True} if stream else None,
+            extra_body=extra_body,
         )
 
     def list_models(self) -> list[str]:
@@ -49,9 +83,18 @@ class LlamaCppBackend:
         return [m.id for m in response.data]
 
     def extract_chunk(self, chunk) -> str:
-        return chunk.choices[0].delta.content or ""
+        content = chunk.choices[0].delta.content or ""
+        # Check if this is the last chunk with usage (delta is None when usage included)
+        if chunk.usage is not None:
+            self._context_tokens = chunk.usage.prompt_tokens
+        return content
 
     def extract_result(self, result) -> tuple[str, int]:
         content = result.choices[0].message.content
-        tokens = getattr(result.usage, "completion_tokens", None) or len(content) // 4
-        return content, tokens
+        usage = result.usage
+        if usage is not None:
+            self._context_tokens = usage.prompt_tokens
+            total_tokens = usage.prompt_tokens + usage.completion_tokens
+        else:
+            total_tokens = getattr(usage, "completion_tokens", None) or len(content) // 4
+        return content, total_tokens

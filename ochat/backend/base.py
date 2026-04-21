@@ -24,3 +24,18 @@ class BackendProtocol(Protocol):
     def type(self) -> str:
         """Backend type identifier ('ollama', 'openai', 'llama_cpp')."""
         ...
+
+    @property
+    def n_ctx(self) -> int:
+        """Context window size. For llama.cpp: from /info (server-determined).
+        For ollama: from client config. For openai: 0 (unknown)."""
+        ...
+
+    @property
+    def context_tokens(self) -> int:
+        """Actual prompt token count from the last API call."""
+        ...
+
+    def get_info(self) -> dict:
+        """Fetch backend-specific server info (e.g., llama.cpp /info endpoint)."""
+        ...
