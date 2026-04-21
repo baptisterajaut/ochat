@@ -26,10 +26,6 @@ class GenerationMixin:
     """Mixin providing LLM generation capabilities for OChat."""
 
     def _chat_call(self, messages: list[dict], stream: bool):
-        """Make API call, return stream iterator or result."""
-        if self.backend_type == "auto":
-            backend = self.backend._detected_backend or self.backend._ollama
-            return backend.chat(self.model, messages, stream, self.num_ctx, self.model_options)
         return self.backend.chat(self.model, messages, stream, self.num_ctx, self.model_options)
 
     def _extract_chunk(self, chunk) -> str:

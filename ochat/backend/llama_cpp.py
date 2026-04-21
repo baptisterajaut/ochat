@@ -24,7 +24,7 @@ class LlamaCppBackend:
 
     @property
     def n_ctx(self) -> int:
-        if self._n_ctx == 0:
+        if self._info_cache is None:
             self._refresh_info()
         return self._n_ctx
 

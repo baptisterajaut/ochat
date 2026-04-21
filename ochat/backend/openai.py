@@ -66,5 +66,5 @@ class OpenAIBackend:
             self._context_tokens = usage.prompt_tokens
             total_tokens = usage.prompt_tokens + usage.completion_tokens
         else:
-            total_tokens = getattr(usage, "completion_tokens", None) or len(content) // 4
+            total_tokens = len(content) // 4
         return content, total_tokens

@@ -46,6 +46,18 @@ class AutoBackend:
             return "auto"
         return self._detected_backend.type
 
+    @property
+    def context_tokens(self) -> int:
+        if self._detected_backend is not None:
+            return self._detected_backend.context_tokens
+        return 0
+
+    @property
+    def n_ctx(self) -> int:
+        if self._detected_backend is not None:
+            return self._detected_backend.n_ctx
+        return 0
+
     def _detect(self) -> BackendProtocol:
         if self._detected_backend is not None:
             return self._detected_backend
