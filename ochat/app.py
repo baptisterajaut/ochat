@@ -20,6 +20,7 @@ from textual.containers import Vertical
 from textual.events import Click
 from textual.widgets import Footer, Input, Static
 
+from ochat.backend import OllamaBackend, OpenAIBackend, LlamaCppBackend, AutoBackend
 from ochat.commands import CommandsMixin
 from ochat.config import (
     CONFIG_DIR,
@@ -50,8 +51,8 @@ def _cleanup_old_logs():
             pass
 
 
-class OllamaChat(CommandsMixin, GenerationMixin, App):
-    """Simple TUI chat for Ollama."""
+class OChat(CommandsMixin, GenerationMixin, App):
+    """ochat - Simple TUI chat for any LLM backend."""
 
     CSS_PATH = "chat.tcss"
     SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -80,6 +81,7 @@ class OllamaChat(CommandsMixin, GenerationMixin, App):
         host: str | None = None,
         verify_ssl: bool = True,
         auto_suggest: bool = True,
+        backend_type: str = "ollama",
     ) -> None:
         super().__init__()
         self.model = model
@@ -91,9 +93,9 @@ class OllamaChat(CommandsMixin, GenerationMixin, App):
         self.config_name = config_name
         self.host = host or "http://localhost:11434"
         self.verify_ssl = verify_ssl
-        self.ollama_client = ollama.Client(host=host, verify=verify_ssl)
-        self._openai_client = None  # lazily initialized via property
-        self.api_mode = "ollama"  # "ollama" or "openai"
+        self.backend_type = backend_type
+        self.backend = self._create_backend(backend_type, host or "http://localhost:11434", verify_ssl)
+        self.api_mode = backend_type  # "ollama", "openai", "llama_cpp", "auto"
         self.messages: list[dict] = []
         self.is_generating = False
         self.streaming = streaming
@@ -110,21 +112,28 @@ class OllamaChat(CommandsMixin, GenerationMixin, App):
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
 
-    @property
+       @property
     def openai_client(self):
-        """Lazy-initialize OpenAI client only when needed."""
-        if self._openai_client is None:
-            if self.verify_ssl:
-                self._openai_client = openai.OpenAI(
-                    base_url=f"{self.host.rstrip('/')}/v1", api_key="not-needed"
-                )
-            else:
-                import httpx
-                self._openai_client = openai.OpenAI(
-                    base_url=f"{self.host.rstrip('/')}/v1", api_key="not-needed",
-                    http_client=httpx.Client(verify=False),
-                )
-        return self._openai_client
+        """Legacy property for backwards compatibility."""
+        if self.backend_type == "openai":
+            return self.backend._client
+        if self.backend_type == "llama_cpp":
+            return self.backend._client
+        raise AttributeError("openai_client only available for openai/llama_cpp backends")
+
+    def _create_backend(self, backend_type: str, host: str, verify_ssl: bool):
+        """Create backend instance based on type."""
+        match backend_type:
+            case "ollama":
+                return OllamaBackend(host=host, verify_ssl=verify_ssl)
+            case "openai":
+                return OpenAIBackend(host=host, verify_ssl=verify_ssl)
+            case "llama_cpp":
+                return LlamaCppBackend(host=host, verify_ssl=verify_ssl)
+            case "auto":
+                return AutoBackend(host=host, verify_ssl=verify_ssl)
+            case _:
+                raise ValueError(f"Unknown backend type: {backend_type}")
 
     @staticmethod
     def _load_system_instructions() -> dict:
@@ -192,8 +201,12 @@ class OllamaChat(CommandsMixin, GenerationMixin, App):
         return f"Messages: {msg_count} | Tokens used: ~{estimated} ({pct:.0f}%) | Context size: {self.num_ctx}"
 
     def _status_text(self, extra: str = "") -> str:
-        if self.api_mode == "openai":
+       if self.backend_type == "auto":
+            base = f"{self.model} (auto)"
+        elif self.backend_type == "openai":
             base = f"{self.model} (openai)"
+        elif self.backend_type == "llama_cpp":
+            base = f"{self.model} (llama.cpp)"
         else:
             base = f"{self.model} | ctx:{self.num_ctx}"
         if self.last_gen_time > 0:
@@ -221,34 +234,41 @@ class OllamaChat(CommandsMixin, GenerationMixin, App):
         """Keep focus on input when clicking anywhere."""
         self.query_one("#chat-input", Input).focus()
 
-    async def _show_greeting(self) -> None:
+async def _show_greeting(self) -> None:
         """Show greeting with ASCII art after validating connection."""
         chat = self.query_one("#chat", ChatContainer)
         config_line = f"config: {self.config_name} · " if self.config_name else ""
 
-        # Try Ollama first, then OpenAI fallback
+        # Try Ollama first, then OpenAI fallback (auto mode)
         mode_label = ""
-        try:
-            await asyncio.to_thread(self.ollama_client.list)
-            self.api_mode = "ollama"
-            _log.info("Connected in Ollama mode")
-            mode_label = "Connected"
-        except Exception as e:
-            _log.info("Ollama list failed (%s), trying OpenAI fallback", e)
+        if self.backend_type == "auto":
             try:
-                await asyncio.to_thread(self.openai_client.models.list)
-                self.api_mode = "openai"
-                _log.info("Connected in OpenAI-compatible mode")
-                mode_label = "Connected (OpenAI mode)"
-            except Exception as e2:
-                _log.warning("OpenAI fallback failed: %s", e2)
-                await self._show_system_message("Warning: Cannot connect to server")
-                return
+                await asyncio.to_thread(self.backend._ollama.list_models)
+                self.api_mode = "ollama"
+                _log.info("Connected in Ollama mode")
+                mode_label = "Connected"
+            except Exception as e:
+                _log.info("Ollama list failed (%s), trying OpenAI fallback", e)
+                try:
+                    await asyncio.to_thread(self.backend._openai.list_models)
+                    self.api_mode = "openai"
+                    _log.info("Connected in OpenAI-compatible mode")
+                    mode_label = "Connected (OpenAI mode)"
+                except Exception as e2:
+                    _log.warning("OpenAI fallback failed: %s", e2)
+                    await self._show_system_message("Warning: Cannot connect to server")
+                    return
+        else:
+            try:
+                await asyncio.to_thread(self.backend.list_models)
+                self.api_mode = self.backend_type
+                _log.info("Connected in %s mode", self.backend_type)
+                mode_label = "Connected"
 
         logo = f"""\
- ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-  ___   ___| |__   __ _| |_
- / _ \\ / __| '_ \\ / _` | __|
+  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+   ___   ___| |__   __ _| |_
+  / _ \\ / __| '_ \\ / _` | __|
 | (_) | (__| | | | (_| | |_
  \\___/ \\___|_| |_|\\__,_|\\__|
 
@@ -358,7 +378,7 @@ def main():
 
     config = load_config()
 
-    parser = argparse.ArgumentParser(description="Simple Ollama TUI chat")
+    parser = argparse.ArgumentParser(description="ochat - Simple TUI chat for any LLM backend")
     parser.add_argument(
         "-C", "--config",
         action="store_true",
@@ -458,7 +478,7 @@ def main():
             args.system, config["personality"], config["append_local_prompt"]
         )
 
-    app = OllamaChat(
+    app = OChat(
         model=model,
         system_prompt=system_prompt,
         num_ctx=num_ctx,
@@ -470,6 +490,7 @@ def main():
         host=host,
         verify_ssl=config["verify_ssl"],
         auto_suggest=config["auto_suggest"],
+        backend_type=config["backend"],
     )
     try:
         app.run()
