@@ -30,6 +30,30 @@ _log = logging.getLogger(__name__)
 class CommandsMixin:
     """Mixin providing slash command handling for OChat."""
 
+    _NOARG_COMMANDS = {
+        "/retry": "_handle_retry",
+        "/r": "_handle_retry",
+        "/undo": "_handle_undo",
+        "/u": "_handle_undo",
+        "/copy": "_handle_copy",
+        "/impersonate": "_handle_impersonate",
+        "/imp": "_handle_impersonate",
+        "/imps": "_handle_impersonate_short",
+        "/suggest": "_handle_suggest_toggle",
+        "/thinking": "_handle_thinking_toggle",
+        "/project": "_handle_project_toggle",
+        "/stats": "_handle_stats",
+        "/st": "_handle_stats",
+        "/compact": "_handle_compact",
+    }
+
+    _ARG_COMMANDS = {
+        "/personality": "_handle_personality_command",
+        "/p": "_handle_personality_command",
+        "/config": "_handle_config_command",
+        "/cfg": "_handle_config_command",
+    }
+
     # Type-check-only declarations: these attributes and methods are actually
     # provided by the composed OChat class (see ochat.app.OChat) — including
     # its GenerationMixin half. Declaring them here satisfies pyright without
@@ -68,6 +92,9 @@ class CommandsMixin:
             raise NotImplementedError
         def action_clear(self) -> None:
             raise NotImplementedError
+        def _clear_suggestion(self, input_widget: Any = None) -> None:
+            raise NotImplementedError
+        _auto_suggest_task: Any
 
         # --- methods from GenerationMixin (also composed on OChat) ---
         async def _chat_call(self, messages: list[dict], stream: bool,
@@ -102,9 +129,52 @@ class CommandsMixin:
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
 
+        if cmd in self._NOARG_COMMANDS:
+            await getattr(self, self._NOARG_COMMANDS[cmd])()
+            return True
+
+        if cmd in self._ARG_COMMANDS:
+            await getattr(self, self._ARG_COMMANDS[cmd])(arg)
+            return True
+
         if cmd in ("/help", "/h", "/?"):
-            help_text = """**Commands:**
+            await self._show_system_message(self._help_text())
+            return True
+
+        if cmd in ("/clear", "/c"):
+            self.action_clear()
+            await self._show_system_message("Chat cleared.")
+            return True
+
+        if cmd in ("/context", "/ctx"):
+            await self._show_system_message(self._context_info())
+            return True
+
+        if cmd == "/prompt":
+            msg = (f"**System prompt:**\n{self.system_prompt}"
+                   if self.system_prompt else "No system prompt set.")
+            await self._show_system_message(msg)
+            return True
+
+        if cmd in ("/sys", "/system"):
+            if arg:
+                self.messages.append({"role": "system", "content": arg})
+                await self._show_system_message(f"*[injected]* {arg}")
+            else:
+                await self._show_system_message("Usage: `/sys <message>`")
+            return True
+
+        if cmd in ("/model", "/m"):
+            await self._show_system_message(f"Model: `{self.model}`")
+            return True
+
+        return False
+
+    @staticmethod
+    def _help_text() -> str:
+        return """**Commands:**
 - `/retry` or `/r` - Regenerate last response
+- `/undo` or `/u` - Remove last exchange, restore message to input
 - `/copy` - Copy last response to clipboard
 - `/clear` or `/c` - Clear chat history
 - `/context` or `/ctx` - Show current context info
@@ -121,82 +191,49 @@ class CommandsMixin:
 - `/stats` or `/st` - Show generation statistics
 - `/compact` - Summarize conversation to free context
 - `/help` or `/h` - Show this help"""
-            await self._show_system_message(help_text)
-            return True
 
-        elif cmd in ("/retry", "/r"):
-            await self._handle_retry()
-            return True
+    async def _handle_undo(self) -> None:
+        """Remove the last user↔assistant exchange, restoring the user message to input."""
+        if self.is_generating:
+            return
 
-        elif cmd == "/copy":
-            await self._handle_copy()
-            return True
+        if not self.messages or self.messages[-1]["role"] != "assistant":
+            await self._show_system_message("Nothing to undo")
+            return
 
-        elif cmd in ("/clear", "/c"):
-            self.action_clear()
-            await self._show_system_message("Chat cleared.")
-            return True
+        last_user_idx = None
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.messages[i]["role"] == "user":
+                last_user_idx = i
+                break
+        if last_user_idx is None:
+            await self._show_system_message("Nothing to undo")
+            return
 
-        elif cmd in ("/context", "/ctx"):
-            await self._show_system_message(self._context_info())
-            return True
+        user_content = self.messages[last_user_idx]["content"]
+        self.messages = self.messages[:last_user_idx]
 
-        elif cmd == "/prompt":
-            if self.system_prompt:
-                await self._show_system_message(f"**System prompt:**\n{self.system_prompt}")
-            else:
-                await self._show_system_message("No system prompt set.")
-            return True
+        chat = self.query_one("#chat", ChatContainer)
+        children = list(chat.children)
+        last_user_widget_idx = None
+        for i in range(len(children) - 1, -1, -1):
+            child = children[i]
+            if isinstance(child, Message) and child.role == "user":
+                last_user_widget_idx = i
+                break
+        if last_user_widget_idx is not None:
+            for child in children[last_user_widget_idx:]:
+                await child.remove()
 
-        elif cmd in ("/sys", "/system"):
-            if arg:
-                self.messages.append({"role": "system", "content": arg})
-                await self._show_system_message(f"*[injected]* {arg}")
-            else:
-                await self._show_system_message("Usage: `/sys <message>`")
-            return True
+        if self._auto_suggest_task and not self._auto_suggest_task.done():
+            self._auto_suggest_task.cancel()
+            self._auto_suggest_task = None
+        self._clear_suggestion()
 
-        elif cmd in ("/model", "/m"):
-            await self._show_system_message(f"Model: `{self.model}`")
-            return True
-
-        elif cmd in ("/personality", "/p"):
-            await self._handle_personality_command(arg)
-            return True
-
-        elif cmd == "/project":
-            await self._handle_project_toggle()
-            return True
-
-        elif cmd in ("/config", "/cfg"):
-            await self._handle_config_command(arg)
-            return True
-
-        elif cmd in ("/impersonate", "/imp"):
-            await self._handle_impersonate()
-            return True
-
-        elif cmd == "/imps":
-            await self._handle_impersonate_short()
-            return True
-
-        elif cmd == "/suggest":
-            await self._handle_suggest_toggle()
-            return True
-
-        elif cmd == "/thinking":
-            await self._handle_thinking_toggle()
-            return True
-
-        elif cmd in ("/stats", "/st"):
-            await self._handle_stats()
-            return True
-
-        elif cmd == "/compact":
-            await self._handle_compact()
-            return True
-
-        return False
+        input_widget = self.query_one("#chat-input", Input)
+        input_widget.value = user_content
+        input_widget.cursor_position = len(user_content)
+        input_widget.focus()
 
     async def _handle_retry(self) -> None:
         """Regenerate the last assistant response."""

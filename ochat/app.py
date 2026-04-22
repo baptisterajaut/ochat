@@ -64,15 +64,17 @@ class OChat(CommandsMixin, GenerationMixin, App):
     DEFAULT_PLACEHOLDER = "Message... (/help for commands)"
 
     BINDINGS = [
-        Binding("ctrl+c", "clear_input", "Clear input", show=False),
+        Binding("ctrl+c", "interrupt", "Clear/Cancel/Quit", show=False),
         Binding("ctrl+d", "quit", "Quit"),
         Binding("ctrl+l", "clear", "Clear"),
         Binding("ctrl+o", "toggle_streaming", "Stream"),
         Binding("ctrl+t", "toggle_thinking", "Think"),
-        Binding("escape", "cancel_or_quit", "Cancel/Quit"),
+        Binding("escape", "cancel", "Cancel"),
         Binding("tab", "focus_input", show=False, priority=True),
         Binding("shift+tab", "focus_input", show=False, priority=True),
     ]
+
+    CTRL_C_DOUBLE_PRESS_WINDOW = 2.0
 
     def __init__(
         self,
@@ -109,6 +111,7 @@ class OChat(CommandsMixin, GenerationMixin, App):
         self._auto_suggest_task: asyncio.Task | None = None
         self._pending_suggestion: str = ""
         self._generation_cancelled = False
+        self._last_ctrl_c: float = 0.0
         self.total_tokens = 0
         self.last_gen_time = 0.0
         self.last_tokens = 0
@@ -347,9 +350,27 @@ class OChat(CommandsMixin, GenerationMixin, App):
 
         await self._generate_response()
 
-    def action_clear_input(self) -> None:
-        """Clear the input field."""
-        self.query_one("#chat-input", Input).value = ""
+    def action_interrupt(self) -> None:
+        """Ctrl+C cascade: clear input → cancel generation → double-press quits."""
+        input_widget = self.query_one("#chat-input", Input)
+        if input_widget.value:
+            input_widget.value = ""
+            self._clear_suggestion(input_widget)
+            self._last_ctrl_c = 0.0
+            return
+        if self.is_generating:
+            self._generation_cancelled = True
+            self.notify("Cancelled", timeout=2)
+            self._last_ctrl_c = 0.0
+            return
+        now = time.monotonic()
+        if now - self._last_ctrl_c <= self.CTRL_C_DOUBLE_PRESS_WINDOW:
+            if self._auto_suggest_task and not self._auto_suggest_task.done():
+                self._auto_suggest_task.cancel()
+            self.exit()
+            return
+        self._last_ctrl_c = now
+        self.notify("Press Ctrl+C again to exit", timeout=self.CTRL_C_DOUBLE_PRESS_WINDOW)
 
     def action_focus_input(self) -> None:
         """Keep focus on input and accept suggestion if any."""
@@ -364,15 +385,11 @@ class OChat(CommandsMixin, GenerationMixin, App):
             input_widget.action_cursor_right()
         input_widget.focus()
 
-    def action_cancel_or_quit(self) -> None:
-        """Cancel generation if running, otherwise quit."""
+    def action_cancel(self) -> None:
+        """Cancel generation if running (no-op otherwise)."""
         if self.is_generating:
             self._generation_cancelled = True
             self.notify("Cancelled", timeout=2)
-        else:
-            if self._auto_suggest_task and not self._auto_suggest_task.done():
-                self._auto_suggest_task.cancel()
-            self.exit()
 
     def action_toggle_streaming(self) -> None:
         """Toggle streaming mode."""
