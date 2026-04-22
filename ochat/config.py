@@ -335,90 +335,56 @@ def _backup_config_interactive(config: dict, default_name: str = "") -> None:
     print(f"Backed up to {backup_file.name}")
 
 
+def _is_ssl_error(host: str, exc: Exception) -> bool:
+    if not host.startswith("https"):
+        return False
+    msg = str(exc).upper()
+    return any(kw in msg for kw in ("SSL", "CERTIFICATE", "VERIFY"))
+
+
+def _prompt_disable_ssl() -> bool:
+    ans = input(
+        "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
+    ).strip().lower()
+    return ans in ("y", "yes")
+
+
+def _backend_probe(host: str, backend_type: str):
+    """Return (list_fn, extract_ids) for a backend type. list_fn takes a verify bool."""
+    if backend_type == "ollama":
+        def list_fn(verify: bool):
+            return ollama.Client(host=host, verify=verify).list()
+        return list_fn, lambda resp: [m.model for m in resp.models]
+
+    if backend_type in ("openai", "llama_cpp"):
+        import httpx
+        import openai
+        base_url = f"{host.rstrip('/')}/v1"
+        api_key = "llama.cpp" if backend_type == "llama_cpp" else "not-needed"
+        def list_fn(verify: bool):
+            kwargs = {"base_url": base_url, "api_key": api_key}
+            if not verify:
+                kwargs["http_client"] = httpx.Client(verify=False)
+            return openai.OpenAI(**kwargs).models.list()
+        return list_fn, lambda resp: [m.id for m in resp.data]
+
+    print(f"Unknown backend type: {backend_type}")
+    sys.exit(1)
+
+
 def __connect_backend(host: str, backend_type: str, verify_ssl: bool) -> tuple[list[str], bool]:
     """Connect to backend, handle SSL retry. Returns (models, verify_ssl)."""
-    if backend_type == "ollama":
-        client = ollama.Client(host=host, verify=verify_ssl)
-        try:
-            models_response = client.list()
-            return [m.model for m in models_response.models], verify_ssl
-        except Exception as e:
-            error_str = str(e).upper()
-            if host.startswith("https") and any(
-                kw in error_str for kw in ("SSL", "CERTIFICATE", "VERIFY")
-            ):
-                skip = input(
-                    "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
-                ).strip().lower()
-                if skip in ("y", "yes"):
-                    try:
-                        client = ollama.Client(host=host, verify=False)
-                        models_response = client.list()
-                        return [m.model for m in models_response.models], False
-                    except Exception as e2:
-                        print(f"Connection error: {e2}")
-                        sys.exit(1)
-            print(f"Connection error: {e}")
-            sys.exit(1)
-    
-    elif backend_type == "openai":
-        import httpx
-        import openai
-        base_url = f"{host.rstrip('/')}/v1"
-        client = openai.OpenAI(base_url=base_url, api_key="not-needed")
-        try:
-            response = client.models.list()
-            return [m.id for m in response.data], verify_ssl
-        except Exception as e:
-            error_str = str(e).upper()
-            if host.startswith("https") and any(
-                kw in error_str for kw in ("SSL", "CERTIFICATE", "VERIFY")
-            ):
-                skip = input(
-                    "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
-                ).strip().lower()
-                if skip in ("y", "yes"):
-                    try:
-                        http_client = httpx.Client(verify=False)
-                        client = openai.OpenAI(base_url=base_url, api_key="not-needed", http_client=http_client)
-                        response = client.models.list()
-                        return [m.id for m in response.data], False
-                    except Exception as e2:
-                        print(f"Connection error: {e2}")
-                        sys.exit(1)
-            print(f"Connection error: {e}")
-            sys.exit(1)
-    
-    elif backend_type == "llama_cpp":
-        import httpx
-        import openai
-        base_url = f"{host.rstrip('/')}/v1"
-        client = openai.OpenAI(base_url=base_url, api_key="llama.cpp")
-        try:
-            response = client.models.list()
-            return [m.id for m in response.data], verify_ssl
-        except Exception as e:
-            error_str = str(e).upper()
-            if host.startswith("https") and any(
-                kw in error_str for kw in ("SSL", "CERTIFICATE", "VERIFY")
-            ):
-                skip = input(
-                    "SSL certificate error. Ignore verification? (homelab only) [y/N]: "
-                ).strip().lower()
-                if skip in ("y", "yes"):
-                    try:
-                        http_client = httpx.Client(verify=False)
-                        client = openai.OpenAI(base_url=base_url, api_key="llama.cpp", http_client=http_client)
-                        response = client.models.list()
-                        return [m.id for m in response.data], False
-                    except Exception as e2:
-                        print(f"Connection error: {e2}")
-                        sys.exit(1)
-            print(f"Connection error: {e}")
-            sys.exit(1)
-    
-    else:
-        print(f"Unknown backend type: {backend_type}")
+    list_fn, extract = _backend_probe(host, backend_type)
+    try:
+        return extract(list_fn(verify_ssl)), verify_ssl
+    except Exception as e:
+        if _is_ssl_error(host, e) and _prompt_disable_ssl():
+            try:
+                return extract(list_fn(False)), False
+            except Exception as e2:
+                print(f"Connection error: {e2}")
+                sys.exit(1)
+        print(f"Connection error: {e}")
         sys.exit(1)
 
 
